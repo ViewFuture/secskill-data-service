@@ -313,3 +313,137 @@ def test_openapi_contract_unchanged(client):
     else:
         result_schema = ref["properties"]["result"]
     assert result_schema["type"] == "string"
+
+
+def test_publish_time_raw_maps_to_publish_date():
+    item = app_module.normalize_item(
+        {
+            "job_title": "网络安全运维工程师",
+            "company": "演示企业A",
+            "region": "广东佛山",
+            "publish_time_raw": "2026-07-01",
+            "description": "x",
+            "skills": ["Linux"],
+            "source_url": "https://example.org/j1",
+        },
+        source_code="mcp_jobs",
+        source_name="mcp-jobs",
+    )
+    assert item is not None
+    assert item["publish_date"] == "2026-07-01"
+    assert item["publish_date_raw"] == "2026-07-01"
+    assert item["trend_eligible"] is True
+
+
+def test_publish_time_raw_with_time_normalized():
+    item = app_module.normalize_item(
+        {
+            "job_title": "SOC分析师",
+            "company": "演示企业B",
+            "publish_time_raw": "2026-07-01T15:30:00",
+            "description": "x",
+            "skills": [],
+        },
+        source_code="mcp_jobs",
+        source_name="mcp-jobs",
+    )
+    assert item is not None
+    assert item["publish_date"] == "2026-07-01"
+    assert item["publish_date_raw"] == "2026-07-01T15:30:00"
+    assert item["trend_eligible"] is True
+
+
+def test_missing_publish_date_empty_and_not_trend_eligible():
+    item = app_module.normalize_item(
+        {
+            "job_title": "安全运营工程师",
+            "company": "演示企业C",
+            "description": "无日期",
+            "skills": [],
+        },
+        source_code="mcp_jobs",
+        source_name="mcp-jobs",
+    )
+    assert item is not None
+    assert item["publish_date"] == ""
+    assert item["publish_date_raw"] == ""
+    assert item["trend_eligible"] is False
+
+
+def test_collected_at_never_used_as_publish_date():
+    item = app_module.normalize_item(
+        {
+            "job_title": "应急响应工程师",
+            "company": "演示企业D",
+            "collected_at": "2026-08-03T00:00:00Z",
+            "description": "x",
+            "skills": [],
+        },
+        source_code="mcp_jobs",
+        source_name="mcp-jobs",
+    )
+    assert item is not None
+    assert item["publish_date"] == ""
+    assert item["trend_eligible"] is False
+
+
+def test_mcp_soft_mode_keeps_missing_date_jobs(client, auth_headers, monkeypatch):
+    _enable_mcp(monkeypatch)
+    monkeypatch.setattr(app_module, "DATE_FILTER_MODE", "soft")
+    fixture = {
+        "provider": "mcp-jobs",
+        "provider_version": "1.4.0",
+        "mode": "fixture",
+        "jobs": [
+            {
+                "job_title": "网络安全运维工程师",
+                "company": "演示企业A",
+                "region": "广东佛山",
+                "publish_time_raw": "2026-07-01",
+                "description": "有日期",
+                "skills": ["Linux"],
+                "source_url": "https://example.org/a",
+            },
+            {
+                "job_title": "安全运营工程师",
+                "company": "演示企业B",
+                "region": "广东广州",
+                "description": "缺日期",
+                "skills": ["SIEM"],
+                "source_url": "https://example.org/b",
+            },
+            {
+                "job_title": "SOC分析师",
+                "company": "演示企业C",
+                "region": "广东深圳",
+                "publish_time_raw": "2026-07-15T09:00:00",
+                "description": "带时间",
+                "skills": ["SOC"],
+                "source_url": "https://example.org/c",
+            },
+        ],
+        "source_ledger": [{"source_code": "mcp_fixture", "status": "ok"}],
+        "warnings": ["FIXTURE_DATA_NOT_FOR_REAL_TREND_CLAIMS"],
+    }
+    with patch.object(
+        app_module,
+        "call_mcp_jobs_adapter",
+        new_callable=AsyncMock,
+        return_value=(fixture, 200),
+    ):
+        response = client.post(COLLECT_PATH, headers=auth_headers, json=BODY)
+    assert response.status_code == 200
+    assert isinstance(response.json()["result"], str)
+    inner = _parse(response)
+    assert inner["data_mode"] == "mcp_adapter_fixture"
+    assert inner["provider"] == "mcp-jobs"
+    assert inner["provider_version"] == "1.4.0"
+    assert inner["count"] == 3
+    by_title = {item["job_title"]: item for item in inner["raw_items"]}
+    assert by_title["网络安全运维工程师"]["publish_date"] == "2026-07-01"
+    assert by_title["网络安全运维工程师"]["trend_eligible"] is True
+    assert by_title["SOC分析师"]["publish_date"] == "2026-07-15"
+    assert by_title["安全运营工程师"]["publish_date"] == ""
+    assert by_title["安全运营工程师"]["trend_eligible"] is False
+    assert "MISSING_PUBLISH_DATE_COUNT:1" in inner["warnings"]
+    assert all("collected_at" not in item.get("publish_date", "") for item in inner["raw_items"])

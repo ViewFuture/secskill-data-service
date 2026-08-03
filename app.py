@@ -263,7 +263,7 @@ def load_demo_items(demo_file: str | None = None) -> list[dict[str, Any]]:
 
 
 def parse_date(value: str | None) -> date | None:
-    """将 YYYY-MM-DD 字符串解析为 date；失败返回 None。
+    """将 YYYY-MM-DD（或以其为前缀的时间戳）解析为 date；失败返回 None。
 
     Args:
         value: 日期字符串。
@@ -276,10 +276,46 @@ def parse_date(value: str | None) -> date | None:
     text = str(value).strip()
     if not text:
         return None
+    # 优先截取前 10 位 YYYY-MM-DD（兼容 "2026-07-01T12:00:00"）
     try:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
     except ValueError:
+        pass
+    # 兼容 ISO / 空格分隔等常见时间格式；绝不使用当前时间回填
+    candidate = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(candidate).date()
+    except ValueError:
         return None
+
+
+PUBLISH_DATE_CANDIDATE_KEYS: tuple[str, ...] = (
+    "publish_date",
+    "publish_time",
+    "publish_time_raw",
+    "posted_at",
+    "date",
+)
+
+
+def extract_publish_date_raw(raw: dict[str, Any]) -> str:
+    """按优先级提取原始发布日期字段，不读取 collected_at。"""
+    for key in PUBLISH_DATE_CANDIDATE_KEYS:
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def normalize_publish_date(raw_value: str) -> str:
+    """将原始日期规范化为 YYYY-MM-DD；无法解析则返回空串，绝不伪造。"""
+    parsed = parse_date(raw_value)
+    if parsed is None:
+        return ""
+    return parsed.isoformat()
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -342,10 +378,8 @@ def normalize_item(
         str(raw.get("region") or raw.get("city") or raw.get("location") or "").strip(),
         MAX_TEXT_FIELD_LEN,
     )
-    publish_date = _truncate(
-        str(raw.get("publish_date") or raw.get("date") or "").strip(),
-        32,
-    )
+    publish_date_raw = _truncate(extract_publish_date_raw(raw), 64)
+    publish_date = normalize_publish_date(publish_date_raw)
     description = _truncate(
         str(raw.get("description") or raw.get("desc") or "").strip(),
         MAX_DESCRIPTION_CHARS,
@@ -360,6 +394,8 @@ def normalize_item(
         "company": company,
         "region": region,
         "publish_date": publish_date,
+        "publish_date_raw": publish_date_raw,
+        "trend_eligible": bool(publish_date),
         "description": description,
         "skills": skills,
         "source_url": source_url,
@@ -666,11 +702,15 @@ def _map_adapter_jobs(
             company = str(raw.get("company") or "").strip()
             if not title:
                 continue
+            publish_date_raw = extract_publish_date_raw(raw)
+            publish_date = normalize_publish_date(publish_date_raw)
             item = {
                 "job_title": title,
                 "company": company or "unknown",
                 "region": str(raw.get("region") or raw.get("city") or ""),
-                "publish_date": str(raw.get("publish_date") or raw.get("date") or ""),
+                "publish_date": publish_date,
+                "publish_date_raw": publish_date_raw,
+                "trend_eligible": bool(publish_date),
                 "description": str(raw.get("description") or ""),
                 "skills": normalize_skills(raw.get("skills")),
                 "source_url": str(raw.get("source_url") or raw.get("url") or ""),
@@ -679,6 +719,42 @@ def _map_adapter_jobs(
             }
         items.append(item)
     return items
+
+
+def _apply_mcp_date_filter(
+    items: list[dict[str, Any]],
+    *,
+    start: date,
+    end: date,
+    mode: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """按 DATE_FILTER_MODE 处理 MCP 岗位日期。
+
+    soft:
+      - 可解析日期：执行区间过滤；
+      - 缺失日期：保留岗位，trend_eligible=false，不伪造日期。
+    hard:
+      - 缺失或越界日期：丢弃。
+    """
+    missing = 0
+    kept: list[dict[str, Any]] = []
+    soft = mode != "hard"
+    for item in items:
+        publish_date = str(item.get("publish_date") or "").strip()
+        parsed = parse_date(publish_date)
+        if parsed is None:
+            missing += 1
+            item["publish_date"] = ""
+            item["trend_eligible"] = False
+            # 禁止用 collected_at / 当前时间回填
+            if soft:
+                kept.append(item)
+            continue
+        item["trend_eligible"] = True
+        if parsed < start or parsed > end:
+            continue
+        kept.append(item)
+    return kept, missing
 
 
 async def call_mcp_jobs_adapter(
@@ -756,18 +832,14 @@ async def _collect_mcp_jobs(
             provider_code="mcp_jobs",
             provider_name=provider,
         )
-        if DATE_FILTER_MODE == "hard":
-            items = [
-                item
-                for item in items
-                if matches_request(
-                    item,
-                    keywords=keywords,
-                    region=request.region,
-                    start=start,
-                    end=end,
-                )
-            ]
+        items, missing_dates = _apply_mcp_date_filter(
+            items,
+            start=start,
+            end=end,
+            mode=DATE_FILTER_MODE,
+        )
+        if missing_dates:
+            warnings.append(f"MISSING_PUBLISH_DATE_COUNT:{missing_dates}")
         items = deduplicate_items(items)[: request.max_items]
 
         if adapter_mode == "live":
