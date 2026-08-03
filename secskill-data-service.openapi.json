@@ -1,0 +1,225 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SecSkill_Data_Service",
+    "description": "为「岗安智练 SecSkill Agent」提供公开岗位数据采集接口。",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Root",
+        "description": "服务根信息。",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Root  Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "description": "健康检查。",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/plugin/v1/jobs/collect": {
+      "post": {
+        "summary": "Collect Public Jobs",
+        "description": "采集公开岗位数据（演示或白名单 JSON Feed）。",
+        "operationId": "collectPublicJobs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectPublicJobsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CollectPublicJobsRequest": {
+        "properties": {
+          "keywords": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Keywords",
+            "description": "检索关键词，支持逗号/空格分隔"
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Region",
+            "description": "地区筛选，可为空",
+            "default": ""
+          },
+          "start_date": {
+            "type": "string",
+            "maxLength": 10,
+            "minLength": 10,
+            "title": "Start Date",
+            "description": "开始日期 YYYY-MM-DD（含）"
+          },
+          "end_date": {
+            "type": "string",
+            "maxLength": 10,
+            "minLength": 10,
+            "title": "End Date",
+            "description": "结束日期 YYYY-MM-DD（含）"
+          },
+          "max_items": {
+            "type": "integer",
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Max Items",
+            "description": "最大返回条数",
+            "default": 20
+          }
+        },
+        "type": "object",
+        "required": [
+          "keywords",
+          "start_date",
+          "end_date"
+        ],
+        "title": "CollectPublicJobsRequest",
+        "description": "公开岗位采集请求体。"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ToolResponse": {
+        "properties": {
+          "result": {
+            "type": "string",
+            "title": "Result"
+          }
+        },
+        "type": "object",
+        "required": [
+          "result"
+        ],
+        "title": "ToolResponse",
+        "description": "星辰 Agent 自定义插件约定响应：result 为 JSON 字符串。"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

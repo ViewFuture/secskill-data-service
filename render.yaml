@@ -1,0 +1,27 @@
+# Render Blueprint for SecSkill_Data_Service
+# Docs: https://render.com/docs/blueprint-spec
+# Secrets (PLUGIN_TOKEN / PUBLIC_BASE_URL) use sync:false — set them in the Render Dashboard.
+# No database / no persistent disk.
+
+services:
+  - type: web
+    name: secskill-data-service
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PLUGIN_TOKEN
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: DEMO_MODE
+        value: "true"
+      - key: SOURCE_FILE
+        value: sources.json
+      - key: DEMO_FILE
+        value: fixtures/jobs.json
+      - key: REQUEST_TIMEOUT_SECONDS
+        value: "20"

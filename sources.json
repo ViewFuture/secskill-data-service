@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "description": "公开岗位数据源白名单。默认全部禁用，不包含任何真实招聘网站。",
+  "sources": [
+    {
+      "id": "demo-placeholder",
+      "name": "演示占位数据源",
+      "base_url": "https://example.org",
+      "enabled": false,
+      "notes": "仅作白名单结构示例，禁止用于真实采集。"
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "demo": true,
+  "description": "仅用于功能联调的虚构演示数据，不得用于真实技能趋势结论或对外宣传。",
+  "jobs": [
+    {
+      "job_title": "网络安全运维工程师",
+      "company": "演示企业A",
+      "region": "广东佛山",
+      "publish_date": "2026-05-10",
+      "description": "负责安全设备日常运维，维护防火墙与WAF策略，开展主机基线巡检。",
+      "skills": ["Linux", "Windows Server", "防火墙", "WAF", "基线核查"],
+      "source_url": "https://example.org/demo/jobs/001"
+    },
+    {
+      "job_title": "安全运营工程师",
+      "company": "演示企业B",
+      "region": "广东广州",
+      "publish_date": "2026-05-20",
+      "description": "负责安全运营值班，使用SIEM开展日志分析与安全事件闭环。",
+      "skills": ["SIEM", "日志分析", "Python", "SOC"],
+      "source_url": "https://example.org/demo/jobs/002"
+    },
+    {
+      "job_title": "SOC分析师",
+      "company": "演示企业C",
+      "region": "广东深圳",
+      "publish_date": "2026-06-01",
+      "description": "负责SOC告警研判、检测规则优化，以及IDS/IPS告警关联分析。",
+      "skills": ["SOC", "告警研判", "IDS", "IPS", "日志分析"],
+      "source_url": "https://example.org/demo/jobs/003"
+    },
+    {
+      "job_title": "网络安全工程师",
+      "company": "演示企业D",
+      "region": "广东佛山",
+      "publish_date": "2026-06-15",
+      "description": "负责网络安全架构设计、等保合规落地与网络协议层安全加固。",
+      "skills": ["等保", "网络协议", "防火墙", "漏洞扫描"],
+      "source_url": "https://example.org/demo/jobs/004"
+    },
+    {
+      "job_title": "应急响应工程师",
+      "company": "演示企业E",
+      "region": "广东广州",
+      "publish_date": "2026-06-25",
+      "description": "承担安全事件应急响应、主机排查与攻击链路复盘。",
+      "skills": ["应急响应", "日志分析", "Python", "Windows Server"],
+      "source_url": "https://example.org/demo/jobs/005"
+    },
+    {
+      "job_title": "信息安全管理员",
+      "company": "演示企业F",
+      "region": "广东深圳",
+      "publish_date": "2026-07-05",
+      "description": "负责信息安全管理制度、数据脱敏策略与等保相关台账维护。",
+      "skills": ["等保", "数据脱敏", "基线核查", "Windows Server"],
+      "source_url": "https://example.org/demo/jobs/006"
+    },
+    {
+      "job_title": "渗透测试工程师",
+      "company": "演示企业G",
+      "region": "广东东莞",
+      "publish_date": "2026-07-15",
+      "description": "负责渗透测试、漏洞扫描验证与修复建议输出。",
+      "skills": ["漏洞扫描", "网络协议", "Python", "WAF"],
+      "source_url": "https://example.org/demo/jobs/007"
+    },
+    {
+      "job_title": "安全服务工程师",
+      "company": "演示企业H",
+      "region": "广东东莞",
+      "publish_date": "2026-07-25",
+      "description": "面向客户交付安全评估、基线核查与等保咨询服务。",
+      "skills": ["基线核查", "等保", "漏洞扫描", "数据脱敏"],
+      "source_url": "https://example.org/demo/jobs/008"
+    },
+    {
+      "job_title": "安全运营工程师",
+      "company": "演示企业A",
+      "region": "广东佛山",
+      "publish_date": "2026-08-01",
+      "description": "负责区域安全运营看板、告警研判与SIEM规则调优。",
+      "skills": ["SIEM", "SOC", "告警研判", "Linux"],
+      "source_url": "https://example.org/demo/jobs/009"
+    },
+    {
+      "job_title": "网络安全运维工程师",
+      "company": "演示企业B",
+      "region": "广东深圳",
+      "publish_date": "2026-05-01",
+      "description": "负责边界防护设备运维，覆盖防火墙、WAF与IDS策略变更。",
+      "skills": ["Linux", "防火墙", "WAF", "IDS", "IPS"],
+      "source_url": "https://example.org/demo/jobs/010"
+    },
+    {
+      "job_title": "网络安全运维工程师",
+      "company": "演示企业A",
+      "region": "广东佛山",
+      "publish_date": "2026-05-10",
+      "description": "【去重测试样本】与001字段联合键相同，用于验证按岗位/公司/地区/发布日期去重。",
+      "skills": ["Linux", "Windows Server", "防火墙", "WAF", "基线核查"],
+      "source_url": "https://example.org/demo/jobs/011"
+    },
+    {
+      "job_title": "渗透测试工程师",
+      "company": "演示企业C",
+      "region": "广东广州",
+      "publish_date": "2026-99-99",
+      "description": "【非法日期测试样本】publish_date非法，采集筛选时应被过滤，不进入结果。",
+      "skills": ["漏洞扫描", "Python", "网络协议"],
+      "source_url": "https://example.org/demo/jobs/012"
+    }
+  ]
+}
