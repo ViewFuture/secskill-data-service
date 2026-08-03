@@ -32,7 +32,7 @@
     "/health": {
       "get": {
         "summary": "Health",
-        "description": "健康检查。",
+        "description": "健康检查（含猎聘只读 Provider 状态，不含 Token）。",
         "operationId": "health_health_get",
         "responses": {
           "200": {
@@ -40,9 +40,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
+                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Health Health Get"
                 }
@@ -55,7 +53,7 @@
     "/plugin/v1/jobs/collect": {
       "post": {
         "summary": "Collect Public Jobs",
-        "description": "采集公开岗位数据（demo / MCP Jobs Adapter / 白名单 JSON Feed）。",
+        "description": "采集公开岗位数据（demo / MCP / 猎聘 / 白名单 JSON Feed）。",
         "operationId": "collectPublicJobs",
         "requestBody": {
           "content": {
@@ -95,10 +93,113 @@
           }
         ]
       }
+    },
+    "/plugin/v1/jobs/collect-liepin": {
+      "post": {
+        "summary": "猎聘授权岗位需求采集",
+        "description": "只读岗位搜索；不执行投递；不包含岗位发布日期和岗位描述。外层 result 为 JSON 字符串，data_mode 固定为 live_authorized_liepin。",
+        "operationId": "collectLiepinJobs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectLiepinJobsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "LIEPIN_PROVIDER_BUSY"
+          },
+          "502": {
+            "description": "LIEPIN_CLI_PROCESS_FAILED / INVALID_JSON / UPSTREAM"
+          },
+          "503": {
+            "description": "LIEPIN_CLI_NOT_INSTALLED / LIEPIN_TOKEN_NOT_CONFIGURED"
+          },
+          "504": {
+            "description": "LIEPIN_CLI_TIMEOUT"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
     "schemas": {
+      "CollectLiepinJobsRequest": {
+        "properties": {
+          "keywords": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Keywords",
+            "description": "检索关键词，可用 | / 中英文逗号 / 换行分隔"
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 30,
+            "minLength": 1,
+            "title": "Region",
+            "description": "地区",
+            "default": "广东"
+          },
+          "max_items": {
+            "type": "integer",
+            "maximum": 60.0,
+            "minimum": 1.0,
+            "title": "Max Items",
+            "description": "最大返回条数",
+            "default": 20
+          },
+          "start_date": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Start Date",
+            "description": "可选；猎聘搜索不支持按发布日过滤，传入时仅增加 warnings",
+            "default": ""
+          },
+          "end_date": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "End Date",
+            "description": "可选；猎聘搜索不支持按发布日过滤，传入时仅增加 warnings",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "keywords"
+        ],
+        "title": "CollectLiepinJobsRequest",
+        "description": "猎聘授权岗位采集请求（日期字段仅兼容，不参与搜索）。"
+      },
       "CollectPublicJobsRequest": {
         "properties": {
           "keywords": {

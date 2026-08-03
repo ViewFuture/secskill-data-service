@@ -29,7 +29,7 @@
 secskill-data-service/
 ├─ app.py                              # FastAPI 应用入口
 ├─ requirements.txt                    # Python 依赖
-├─ .python-version                     # Python 3.11.x
+├─ .python-version                     # Python 3.12.7
 ├─ .gitignore
 ├─ .env.example                        # 环境变量模板（无真实密钥）
 ├─ render.yaml                         # Render Blueprint（可选）
@@ -69,6 +69,8 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ```powershell
 pip install -r requirements.txt
+# requirements.txt 已含钉死 commit 的 liepin-cli；本地亦可：
+# bash scripts/install_liepin_cli.sh
 ```
 
 ### 3. 创建 `.env`
@@ -209,7 +211,8 @@ git push -u origin main
 |------|--------|
 | Language / Runtime | Python |
 | Branch | `main`（或你的默认分支） |
-| Build Command | `pip install -r requirements.txt` |
+| Build Command | `pip install -r requirements.txt && python -c "import liepin_cli"` |
+| Python | **3.12.7**（`.python-version` / `PYTHON_VERSION`） |
 | Start Command | `uvicorn app:app --host 0.0.0.0 --port $PORT` |
 | Health Check Path | `/health` |
 | Auto Deploy | Enabled / On |
@@ -266,10 +269,36 @@ python scripts/export_openapi.py
 3. 在星辰自定义插件中导入该 OpenAPI。
 4. 插件鉴权选择 **HTTP Bearer**，Token 与 Render / `.env` 中的 `PLUGIN_TOKEN` 保持一致。
 5. 确认工具：
-   - **operationId** = **`collectPublicJobs`**
+   - **operationId** = **`collectPublicJobs`**（公开/MCP/演示）
    - 路径 = `POST /plugin/v1/jobs/collect`
-   - 输出约定：外层 **`result: String`**（内部再解析 JSON，含 `count`、`data_mode`、`batch_preview`、`raw_items`、`source_ledger`、`warnings`）
+   - 猎聘独立工具：**operationId** = **`collectLiepinJobs`**
+   - 路径 = `POST /plugin/v1/jobs/collect-liepin`
+   - 输出约定：外层 **`result: String`**（内部再 `json.loads`）
 6. 将插件 Base URL / Server 指向 Render 公网地址（与 `PUBLIC_BASE_URL` 一致）。
+
+### 猎聘接口 curl 示例
+
+```bash
+export SERVICE_BASE_URL="https://secskill-data-service.onrender.com"
+export PLUGIN_TOKEN="<your-plugin-token>"
+
+# 健康检查（含 liepin_* 布尔状态，不含 Token）
+curl -sS "$SERVICE_BASE_URL/health"
+
+# 猎聘授权岗位采集（operationId=collectLiepinJobs）
+curl -sS -X POST "$SERVICE_BASE_URL/plugin/v1/jobs/collect-liepin" \
+  -H "Authorization: Bearer $PLUGIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "keywords": "网络安全工程师|信息安全工程师|渗透测试工程师",
+    "region": "广东",
+    "max_items": 30,
+    "start_date": "",
+    "end_date": ""
+  }'
+```
+
+说明：`start_date`/`end_date` 若非空，不会参与猎聘搜索，仅在内部 `warnings` 增加 `DATE_FILTER_NOT_SUPPORTED_BY_LIEPIN_SEARCH`。
 
 ---
 
@@ -277,8 +306,10 @@ python scripts/export_openapi.py
 
 | 项 | 约定 |
 |----|------|
-| operationId | `collectPublicJobs`（严格相等） |
+| operationId（公开） | `collectPublicJobs` |
+| operationId（猎聘） | `collectLiepinJobs` |
 | 工具输出 | `{ "result": "<string>" }`，**result 必须是 String** |
+| 猎聘 data_mode | `live_authorized_liepin` |
 | DEMO_MODE=true | 仅演示/联调，**不得用于真实趋势分析** |
 | 持久化 | Render 本地磁盘 **不是** 岗位快照数据库 |
 

@@ -10,9 +10,12 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+tmp/
 dist/
 build/
 *.egg-info/
 .idea/
 .vscode/
 *.log
+# Accidental nested repository copy
+/secskill-data-service/

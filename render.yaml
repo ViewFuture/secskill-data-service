@@ -8,11 +8,12 @@ services:
     name: secskill-data-service
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r requirements.txt && python -c "import liepin_cli"    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
       - key: PLUGIN_TOKEN
         sync: false
       - key: PUBLIC_BASE_URL
@@ -41,3 +42,23 @@ services:
         value: "1"
       - key: DATE_FILTER_MODE
         value: soft
+      - key: LIEPIN_USER_TOKEN
+        sync: false
+      - key: LIEPIN_CLI_TIMEOUT_SECONDS
+        value: "45"
+      - key: LIEPIN_MAX_CONCURRENT
+        value: "1"
+      - key: LIEPIN_MAX_KEYWORDS
+        value: "3"
+      - key: LIEPIN_MAX_PAGES
+        value: "1"
+      - key: LIEPIN_MAX_ITEMS_LIMIT
+        value: "60"
+      - key: LIEPIN_CACHE_TTL_SECONDS
+        value: "600"
+      - key: LIEPIN_OUTPUT_MAX_BYTES
+        value: "2000000"
+      - key: LIEPIN_CLI_COMMIT
+        value: "858a62bd839d490e8745b7503961e4676a54b9d7"
+      - key: LIEPIN_FALLBACK_TO_SNAPSHOT
+        value: "false"

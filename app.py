@@ -98,6 +98,7 @@ MCP_JOBS_FALLBACK_TO_DEMO: bool = _parse_bool(
 MCP_JOBS_PAGE: int = _parse_int(os.getenv("MCP_JOBS_PAGE"), default=1)
 DATE_FILTER_MODE: str = (os.getenv("DATE_FILTER_MODE") or "soft").strip().lower()
 
+# 猎聘配置在 providers.liepin 内加载；此处仅记录 provider 选择相关摘要。
 logger.info(
     "runtime_config demo_mode=%s job_provider=%s mcp_jobs_enabled=%s "
     "adapter_base_url_configured=%s adapter_token_configured=%s "
@@ -161,6 +162,39 @@ class ToolResponse(BaseModel):
     """星辰 Agent 自定义插件约定响应：result 为 JSON 字符串。"""
 
     result: str
+
+
+class CollectLiepinJobsRequest(BaseModel):
+    """猎聘授权岗位采集请求（日期字段仅兼容，不参与搜索）。"""
+
+    keywords: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="检索关键词，可用 | / 中英文逗号 / 换行分隔",
+    )
+    region: str = Field(
+        default="广东",
+        min_length=1,
+        max_length=30,
+        description="地区",
+    )
+    max_items: int = Field(
+        default=20,
+        ge=1,
+        le=60,
+        description="最大返回条数",
+    )
+    start_date: str = Field(
+        default="",
+        max_length=32,
+        description="可选；猎聘搜索不支持按发布日过滤，传入时仅增加 warnings",
+    )
+    end_date: str = Field(
+        default="",
+        max_length=32,
+        description="可选；猎聘搜索不支持按发布日过滤，传入时仅增加 warnings",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1052,12 +1086,16 @@ async def root() -> dict[str, str]:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    """健康检查。"""
-    return {
+async def health() -> dict[str, Any]:
+    """健康检查（含猎聘只读 Provider 状态，不含 Token）。"""
+    from providers.liepin import liepin_health_snapshot
+
+    payload: dict[str, Any] = {
         "status": "ok",
         "service": "SecSkill_Data_Service",
     }
+    payload.update(liepin_health_snapshot(JOB_PROVIDER))
+    return payload
 
 
 @app.post(
@@ -1067,7 +1105,7 @@ async def health() -> dict[str, str]:
     dependencies=[Depends(require_plugin_token)],
 )
 async def collect_public_jobs(request: CollectPublicJobsRequest) -> ToolResponse:
-    """采集公开岗位数据（demo / MCP Jobs Adapter / 白名单 JSON Feed）。"""
+    """采集公开岗位数据（demo / MCP / 猎聘 / 白名单 JSON Feed）。"""
     start, end = _validate_request_dates(request)
     keywords = _split_keywords(request.keywords)
     if not keywords:
@@ -1076,7 +1114,7 @@ async def collect_public_jobs(request: CollectPublicJobsRequest) -> ToolResponse
             detail="keywords must contain at least one non-empty token",
         )
 
-    # 优先级：DEMO_MODE → mcp_jobs → public sources
+    # 优先级：DEMO_MODE → mcp_jobs → liepin_cli → public sources
     if DEMO_MODE:
         logger.info(
             "collect_routing selected_provider=demo demo_mode=true job_provider=%s",
@@ -1097,6 +1135,10 @@ async def collect_public_jobs(request: CollectPublicJobsRequest) -> ToolResponse
             request, keywords=keywords, start=start, end=end
         )
 
+    if JOB_PROVIDER == "liepin_cli":
+        # 兼容路径：仍返回 result:String，错误以 warnings/ledger 表达（不改旧契约）
+        return await _collect_liepin_soft(request)
+
     logger.info(
         "collect_routing selected_provider=public_sources demo_mode=false "
         "job_provider=%s mcp_jobs_enabled=%s",
@@ -1112,3 +1154,113 @@ async def collect_public_jobs(request: CollectPublicJobsRequest) -> ToolResponse
         json.loads(result.result).get("count"),
     )
     return result
+
+
+_LIEPIN_HTTP_ERROR_MAP: dict[str, tuple[int, str]] = {
+    "CLI_NOT_INSTALLED": (503, "LIEPIN_CLI_NOT_INSTALLED"),
+    "TOKEN_MISSING": (503, "LIEPIN_TOKEN_NOT_CONFIGURED"),
+    "PROVIDER_BUSY": (429, "LIEPIN_PROVIDER_BUSY"),
+    "TIMEOUT": (504, "LIEPIN_CLI_TIMEOUT"),
+    "CLI_NONZERO_EXIT": (502, "LIEPIN_CLI_PROCESS_FAILED"),
+    "CLI_EXEC_ERROR": (502, "LIEPIN_CLI_PROCESS_FAILED"),
+    "INVALID_JSON": (502, "LIEPIN_CLI_INVALID_JSON"),
+    "PAYLOAD_CODE_ERROR": (502, "LIEPIN_UPSTREAM_BUSINESS_ERROR"),
+    "INVALID_PAYLOAD": (502, "LIEPIN_CLI_INVALID_JSON"),
+    "OUTPUT_TOO_LARGE": (502, "LIEPIN_CLI_PROCESS_FAILED"),
+}
+
+
+def _raise_liepin_http_error(error_code: str, message: str) -> None:
+    status_code, public_code = _LIEPIN_HTTP_ERROR_MAP.get(
+        error_code, (502, "LIEPIN_CLI_PROCESS_FAILED")
+    )
+    raise HTTPException(
+        status_code=status_code,
+        detail={"error_code": public_code, "message": message},
+    )
+
+
+@app.post(
+    "/plugin/v1/jobs/collect-liepin",
+    response_model=ToolResponse,
+    operation_id="collectLiepinJobs",
+    dependencies=[Depends(require_plugin_token)],
+    summary="猎聘授权岗位需求采集",
+    description=(
+        "只读岗位搜索；不执行投递；不包含岗位发布日期和岗位描述。"
+        "外层 result 为 JSON 字符串，data_mode 固定为 live_authorized_liepin。"
+    ),
+    responses={
+        429: {"description": "LIEPIN_PROVIDER_BUSY"},
+        502: {"description": "LIEPIN_CLI_PROCESS_FAILED / INVALID_JSON / UPSTREAM"},
+        503: {"description": "LIEPIN_CLI_NOT_INSTALLED / LIEPIN_TOKEN_NOT_CONFIGURED"},
+        504: {"description": "LIEPIN_CLI_TIMEOUT"},
+    },
+)
+async def collect_liepin_jobs_endpoint(
+    request: CollectLiepinJobsRequest,
+) -> ToolResponse:
+    """猎聘授权岗位需求采集（星辰独立工具 collectLiepinJobs）。"""
+    from providers.liepin.cli_runner import LiepinCliError, liepin_cli_installed
+    from providers.liepin.config import load_liepin_config
+    from providers.liepin.provider import collect_liepin_jobs
+
+    cfg = load_liepin_config()
+    if not liepin_cli_installed():
+        _raise_liepin_http_error(
+            "CLI_NOT_INSTALLED", "liepin-cli is not installed"
+        )
+    if not cfg.user_token_configured:
+        _raise_liepin_http_error(
+            "TOKEN_MISSING", "Liepin token is not configured"
+        )
+
+    date_filter_unsupported = bool(
+        (request.start_date or "").strip() or (request.end_date or "").strip()
+    )
+    try:
+        inner = await collect_liepin_jobs(
+            keywords=request.keywords,
+            region=request.region,
+            max_items=request.max_items,
+            config=cfg,
+            strict=True,
+            date_filter_unsupported=date_filter_unsupported,
+        )
+    except LiepinCliError as exc:
+        _raise_liepin_http_error(exc.error_code, exc.message)
+
+    logger.info(
+        "collect_done selected_provider=liepin_cli returned_job_count=%s "
+        "data_mode=%s",
+        inner.get("count"),
+        inner.get("data_mode"),
+    )
+    # result 必须是字符串，不能是对象
+    return ToolResponse(result=json.dumps(inner, ensure_ascii=False))
+
+
+async def _collect_liepin_soft(request: CollectPublicJobsRequest) -> ToolResponse:
+    """旧 collect 在 JOB_PROVIDER=liepin_cli 时的软失败包装。"""
+    from providers.liepin.provider import collect_liepin_jobs
+
+    logger.info(
+        "collect_routing selected_provider=liepin_cli keywords_len=%s region_set=%s",
+        len(request.keywords or ""),
+        bool((request.region or "").strip()),
+    )
+    date_filter_unsupported = True  # 旧接口始终带日期字段
+    inner = await collect_liepin_jobs(
+        keywords=request.keywords,
+        region=request.region or "广东",
+        max_items=min(request.max_items, 60),
+        strict=False,
+        date_filter_unsupported=date_filter_unsupported,
+    )
+    logger.info(
+        "collect_done selected_provider=liepin_cli returned_job_count=%s "
+        "data_mode=%s",
+        inner.get("count"),
+        inner.get("data_mode"),
+    )
+    return ToolResponse(result=json.dumps(inner, ensure_ascii=False))

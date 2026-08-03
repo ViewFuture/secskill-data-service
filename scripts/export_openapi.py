@@ -14,6 +14,7 @@ from app import app  # noqa: E402
 
 OUT_FILE = ROOT / "secskill-data-service.openapi.json"
 COLLECT_PATH = "/plugin/v1/jobs/collect"
+COLLECT_LIEPIN_PATH = "/plugin/v1/jobs/collect-liepin"
 REQUIRED_REQUEST_FIELDS = (
     "keywords",
     "region",
@@ -127,6 +128,32 @@ def validate_openapi(schema: dict[str, Any]) -> None:
                         has_bearer_ref = True
         if not has_bearer_ref:
             _fail("OpenAPI must include HTTP Bearer security scheme")
+
+    if COLLECT_LIEPIN_PATH not in paths:
+        _fail(f"paths must include {COLLECT_LIEPIN_PATH}")
+    liepin_post = paths[COLLECT_LIEPIN_PATH].get("post")
+    if not isinstance(liepin_post, dict):
+        _fail(f"{COLLECT_LIEPIN_PATH} must define POST")
+    if liepin_post.get("operationId") != "collectLiepinJobs":
+        _fail(
+            "collect-liepin operationId must be collectLiepinJobs, "
+            f"got {liepin_post.get('operationId')!r}"
+        )
+    liepin_ok = (liepin_post.get("responses") or {}).get("200")
+    if not isinstance(liepin_ok, dict):
+        _fail("collect-liepin 200 response is missing")
+    liepin_schema = (
+        ((liepin_ok.get("content") or {}).get("application/json") or {}).get("schema")
+    )
+    if not isinstance(liepin_schema, dict):
+        _fail("collect-liepin 200 schema missing")
+    liepin_schema = _resolve_ref(schema, liepin_schema)
+    liepin_result = liepin_schema.get("properties", {}).get("result")
+    if not isinstance(liepin_result, dict):
+        _fail("collect-liepin result missing")
+    liepin_result = _resolve_ref(schema, liepin_result)
+    if liepin_result.get("type") != "string":
+        _fail("collect-liepin result.type must be string")
 
 
 def main() -> None:

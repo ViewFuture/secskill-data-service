@@ -13,7 +13,7 @@
 |------|------|
 | `app.py` | 存在 |
 | `requirements.txt` | 存在 |
-| `.python-version` | 存在（`3.11.11`） |
+| `.python-version` | 存在（`3.12.7`） |
 | `.env.example` | 存在 |
 | `sources.json` | 存在 |
 | `fixtures/jobs.json` | 存在 |
@@ -31,11 +31,11 @@
 
 | 项 | 结果 |
 |----|------|
-| `.python-version` | `3.11.11` |
-| 本地解释器 | Python 3.11.15（`.venv`） |
+| `.python-version` | `3.12.7`（P0 已更新；原验收为 3.11.11） |
+| 本地解释器 | 以当前环境为准（目标运行时 **3.12.7**） |
 | `pip install -r requirements.txt` | 通过 |
 
-**结论**：满足 Python 3.11 要求，依赖安装成功。
+**结论**：Python 运行时目标已钉死为 **3.12.7**；依赖安装成功。
 
 ---
 
