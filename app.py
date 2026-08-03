@@ -1206,7 +1206,7 @@ async def collect_liepin_jobs_endpoint(
     from providers.liepin.provider import collect_liepin_jobs
 
     cfg = load_liepin_config()
-    if not liepin_cli_installed(cfg.python_executable):
+    if not liepin_cli_installed(cfg.cli_executable):
         _raise_liepin_http_error(
             "CLI_NOT_INSTALLED", "liepin-cli is not installed"
         )

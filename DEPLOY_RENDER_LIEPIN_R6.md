@@ -26,9 +26,10 @@
 ## 1. 架构要点（部署相关）
 
 - 网关：FastAPI + uvicorn，**单进程**推荐（信号量/缓存在进程内）。
-- 猎聘：独立 venv 子进程，仅允许  
-  `<LIEPIN_PYTHON_EXECUTABLE> -m liepin_cli.main job search --job-name … --address … --page … --output json`
-- Token：环境变量 `LIEPIN_USER_TOKEN` 继承给子进程，**禁止**写入 argv / 日志 / OpenAPI。
+- 猎聘：独立 venv 控制台脚本子进程，仅允许
+  `<LIEPIN_CLI_EXECUTABLE> job search --job-name … --address … --page … --output json`
+- 分页：零基；`LIEPIN_MAX_PAGES=1` → 仅 `page=0`。
+- Token：环境变量 `LIEPIN_USER_TOKEN` 显式写入子进程 env，**禁止**写入 argv / 日志 / OpenAPI。
 - 独立工具：`POST /plugin/v1/jobs/collect-liepin`，`operationId=collectLiepinJobs`。
 - 原工具：`POST /plugin/v1/jobs/collect`，`operationId=collectPublicJobs`（保持不变）。
 
@@ -41,10 +42,12 @@
 | Key | Blueprint | 说明 |
 |-----|-----------|------|
 | `LIEPIN_USER_TOKEN` | `sync: false` | Dashboard 填写；勿提交 |
+| `LIEPIN_CLI_EXECUTABLE` | `.liepin-venv/bin/liepin-cli` | 控制台脚本路径 |
+| `LIEPIN_PYTHON_EXECUTABLE` | `.liepin-venv/bin/python` | 兼容旧配置；搜索不再使用 |
 | `LIEPIN_CLI_TIMEOUT_SECONDS` | `45` | CLI 超时 |
 | `LIEPIN_MAX_CONCURRENT` | `1` | 进程内并发 |
 | `LIEPIN_MAX_KEYWORDS` | `3` | 关键词上限 |
-| `LIEPIN_MAX_PAGES` | `1` | 页数上限 |
+| `LIEPIN_MAX_PAGES` | `1` | 调用页数（从 page=0 起） |
 | `LIEPIN_MAX_ITEMS_LIMIT` | `60` | 内部硬顶 |
 | `LIEPIN_CACHE_TTL_SECONDS` | `600` | 搜索缓存 TTL |
 | `LIEPIN_OUTPUT_MAX_BYTES` | `2000000` | stdout 上限 |
@@ -76,7 +79,8 @@ bash build.sh
 1. `pip install -r requirements.txt`（主 FastAPI 环境，**不含** liepin-cli，**不含** pytest）
 2. 重建 `.liepin-venv`
 3. 在独立 venv 内安装 `requirements-liepin.txt`
-4. 验证 `import liepin_cli` 与 `python -m liepin_cli.main --help`
+4. 验证 `import liepin_cli`
+5. 验证 `.liepin-venv/bin/liepin-cli` 可执行，以及 `--help` / `job search --help`
 
 本地跑测试请另装：`pip install -r requirements-dev.txt`（Render 生产构建不安装）。
 
@@ -88,13 +92,13 @@ git+https://github.com/liepin-tech-2026/liepin-cil.git@858a62bd839d490e8745b7503
 
 （SHA 来自 `git ls-remote … refs/heads/main`，已冻结。）
 
-运行时通过 `LIEPIN_PYTHON_EXECUTABLE`（默认 `.liepin-venv/bin/python`）执行模块调用（`asyncio.create_subprocess_exec`，无 shell）。
+运行时通过 `LIEPIN_CLI_EXECUTABLE`（默认 `.liepin-venv/bin/liepin-cli`）执行控制台脚本（`asyncio.create_subprocess_exec`，无 shell）。
 
 环境变量：
 
 ```text
 PYTHON_VERSION=3.12.7
-LIEPIN_PYTHON_EXECUTABLE=.liepin-venv/bin/python
+LIEPIN_CLI_EXECUTABLE=.liepin-venv/bin/liepin-cli
 LIEPIN_CLI_COMMIT=858a62bd839d490e8745b7503961e4676a54b9d7
 WEB_CONCURRENCY=1
 ```
@@ -104,7 +108,7 @@ WEB_CONCURRENCY=1
 ```json
 {
   "liepin_cli_installed": true,
-  "liepin_invocation_mode": "isolated_python_module",
+  "liepin_invocation_mode": "isolated_console_script",
   "liepin_token_configured": true,
   "liepin_provider_enabled": false,
   "liepin_cli_commit": "858a62bd839d490e8745b7503961e4676a54b9d7"
@@ -125,7 +129,7 @@ WEB_CONCURRENCY=1
 | `JOB_PROVIDER` | `mcp_jobs`（保持原行为） |
 | `MCP_JOBS_ENABLED` | `true` |
 | `LIEPIN_USER_TOKEN` | （Dashboard 密钥） |
-| `LIEPIN_PYTHON_EXECUTABLE` | `.liepin-venv/bin/python` |
+| `LIEPIN_CLI_EXECUTABLE` | `.liepin-venv/bin/liepin-cli` |
 | `LIEPIN_FALLBACK_TO_SNAPSHOT` | `false` |
 
 星辰侧可同时挂两个工具：`collectPublicJobs` + `collectLiepinJobs`。
@@ -146,7 +150,7 @@ WEB_CONCURRENCY=1
 1. Render → Service → Environment。
 2. 设置 `PLUGIN_TOKEN`（强随机，与星辰插件 Bearer 一致）。
 3. 设置 `LIEPIN_USER_TOKEN`（猎聘用户授权 Token；**仅此环境**）。
-4. 确认 `LIEPIN_PYTHON_EXECUTABLE=.liepin-venv/bin/python`。
+4. 确认 `LIEPIN_CLI_EXECUTABLE=.liepin-venv/bin/liepin-cli`。
 5. 设置 `PUBLIC_BASE_URL` 为公网 URL（供 OpenAPI servers）。
 6. 保存并 **Manual Deploy**（若未自动部署）。
 
@@ -163,8 +167,8 @@ WEB_CONCURRENCY=1
 1. [ ] 合并/提交猎聘代码（本手册不执行 push）
 2. [x] `.python-version` → `3.12.7`
 3. [x] `buildCommand` → `bash build.sh`（独立 `.liepin-venv`）
-4. [ ] Dashboard 填写 `PLUGIN_TOKEN` / `LIEPIN_USER_TOKEN`（确认 `LIEPIN_PYTHON_EXECUTABLE`）
-5. [ ] Deploy 成功，`GET /health` 返回 `status=ok`、`liepin_cli_installed=true`、`liepin_invocation_mode=isolated_python_module`
+4. [ ] Dashboard 填写 `PLUGIN_TOKEN` / `LIEPIN_USER_TOKEN`（确认 `LIEPIN_CLI_EXECUTABLE`）
+5. [ ] Deploy 成功，`GET /health` 返回 `status=ok`、`liepin_cli_installed=true`、`liepin_invocation_mode=isolated_console_script`
 6. [ ] 用错误 Bearer 调 collect-liepin → **401**
 7. [ ] 用正确 Bearer 调 collect-liepin → **200**，`result` 为 JSON **字符串**
 8. [ ] 确认内层 `data_mode=live_authorized_liepin`，`trend_eligible` 全 false

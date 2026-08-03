@@ -74,7 +74,7 @@ def liepin_health_snapshot(job_provider: str = "") -> dict[str, Any]:
     provider = (job_provider or "").strip().lower()
     return {
         "liepin_cli_installed": liepin_cli_runner.liepin_cli_installed(
-            cfg.python_executable
+            cfg.cli_executable
         ),
         "liepin_invocation_mode": LIEPIN_INVOCATION_MODE,
         "liepin_token_configured": cfg.user_token_configured,
@@ -234,7 +234,7 @@ async def collect_liepin_jobs(
             }
         )
     else:
-        if strict and not liepin_cli_runner.liepin_cli_installed(cfg.python_executable):
+        if strict and not liepin_cli_runner.liepin_cli_installed(cfg.cli_executable):
             raise LiepinCliError("CLI_NOT_INSTALLED", "liepin-cli is not installed")
         # 多关键词串行；页串行（零基 page：0..(max_pages-1)）；进程内 semaphore 限制并发。
         for keyword in keyword_list:

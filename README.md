@@ -238,7 +238,8 @@ CLI 钉死 commit：`858a62bd839d490e8745b7503961e4676a54b9d7`（`git ls-remote`
 
 | Key | Value | 说明 |
 |-----|-------|------|
-| `LIEPIN_PYTHON_EXECUTABLE` | `.liepin-venv/bin/python` | 独立 venv 解释器 |
+| `LIEPIN_CLI_EXECUTABLE` | `.liepin-venv/bin/liepin-cli` | 独立 venv 控制台脚本（正式搜索入口） |
+| `LIEPIN_PYTHON_EXECUTABLE` | `.liepin-venv/bin/python` | 兼容旧配置；搜索不再使用 |
 | `LIEPIN_USER_TOKEN` | （Dashboard，勿入库） | 猎聘授权 Token |
 
 **Environment Variables：**

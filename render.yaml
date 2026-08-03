@@ -45,6 +45,8 @@ services:
         value: soft
       - key: LIEPIN_USER_TOKEN
         sync: false
+      - key: LIEPIN_CLI_EXECUTABLE
+        value: ".liepin-venv/bin/liepin-cli"
       - key: LIEPIN_PYTHON_EXECUTABLE
         value: ".liepin-venv/bin/python"
       - key: LIEPIN_CLI_TIMEOUT_SECONDS

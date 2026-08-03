@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 
 from providers.liepin.cli_pin import (
+    DEFAULT_LIEPIN_CLI_EXECUTABLE,
     DEFAULT_LIEPIN_PYTHON_EXECUTABLE,
     LIEPIN_CLI_PINNED_COMMIT,
 )
@@ -67,7 +68,8 @@ class LiepinConfig:
     output_max_bytes: int
     cli_commit: str
     fallback_to_snapshot: bool
-    python_executable: str
+    cli_executable: str
+    python_executable: str  # 兼容旧 env；搜索不再使用
 
 
 def load_liepin_config() -> LiepinConfig:
@@ -106,6 +108,10 @@ def load_liepin_config() -> LiepinConfig:
         fallback_to_snapshot=_parse_bool(
             os.getenv("LIEPIN_FALLBACK_TO_SNAPSHOT"), default=False
         ),
+        cli_executable=(
+            (os.getenv("LIEPIN_CLI_EXECUTABLE") or "").strip()
+            or DEFAULT_LIEPIN_CLI_EXECUTABLE
+        ),
         python_executable=(
             (os.getenv("LIEPIN_PYTHON_EXECUTABLE") or "").strip()
             or DEFAULT_LIEPIN_PYTHON_EXECUTABLE
@@ -115,7 +121,7 @@ def load_liepin_config() -> LiepinConfig:
         "liepin_config token_configured=%s timeout=%s max_concurrent=%s "
         "max_keywords=%s max_pages=%s max_items_limit=%s cache_ttl=%s "
         "output_max_bytes=%s cli_commit=%s fallback_to_snapshot=%s "
-        "python_executable_configured=%s",
+        "cli_executable_configured=%s",
         cfg.user_token_configured,
         cfg.timeout_seconds,
         cfg.max_concurrent,
@@ -126,6 +132,6 @@ def load_liepin_config() -> LiepinConfig:
         cfg.output_max_bytes,
         cfg.cli_commit,
         cfg.fallback_to_snapshot,
-        bool(cfg.python_executable),
+        bool(cfg.cli_executable),
     )
     return cfg

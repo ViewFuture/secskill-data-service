@@ -48,10 +48,18 @@ def _cfg(**overrides: Any) -> LiepinConfig:
         output_max_bytes=2_000_000,
         cli_commit="test-commit",
         fallback_to_snapshot=False,
+        cli_executable=".liepin-venv/bin/liepin-cli",
         python_executable=".liepin-venv/bin/python",
     )
     base.update(overrides)
     return LiepinConfig(**base)
+
+
+def _make_fake_cli(tmp_path):
+    fake_cli = tmp_path / "liepin-cli"
+    fake_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_cli.chmod(0o755)
+    return fake_cli
 
 
 def _job(job_id: str, title: str = "网络安全工程师", company: str = "演示企业A") -> dict:
@@ -143,31 +151,42 @@ def _clear_liepin_runtime_state():
 # ---------------------------------------------------------------------------
 
 
-def test_build_liepin_search_argv_uses_module_invocation(tmp_path):
-    fake_py = tmp_path / "liepin-python"
-    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
-    fake_py.chmod(0o755)
+def test_build_liepin_search_argv_uses_console_script(tmp_path):
+    fake_cli = _make_fake_cli(tmp_path)
 
     argv = build_liepin_search_argv(
         "安全工程师",
         "广东",
-        1,
-        python_executable=str(fake_py),
+        0,
+        cli_executable=str(fake_cli),
     )
-    assert argv[0] == str(fake_py.resolve())
-    assert argv[1:5] == ["-m", "liepin_cli.main", "job", "search"]
+    assert argv[0] == str(fake_cli.resolve())
+    assert argv[1:3] == ["job", "search"]
+    assert "-m" not in argv
+    assert "liepin_cli.main" not in argv
     assert "--job-name" in argv and "安全工程师" in argv
     assert "apply" not in argv and "resume" not in argv and "auth" not in argv
-    assert liepin_cli_installed(str(fake_py)) is True
-    missing = tmp_path / "missing-python"
+    assert liepin_cli_installed(str(fake_cli)) is True
+    missing = tmp_path / "missing-cli"
     assert liepin_cli_installed(str(missing)) is False
 
 
-def test_liepin_python_without_execute_permission(tmp_path):
-    fake_py = tmp_path / "noexec-python"
-    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
-    fake_py.chmod(0o644)
-    assert liepin_cli_installed(str(fake_py)) is False
+def test_default_cli_executable_is_liepin_venv_console_script(monkeypatch):
+    from providers.liepin.cli_pin import DEFAULT_LIEPIN_CLI_EXECUTABLE
+    from providers.liepin.cli_runner import resolve_liepin_cli_executable
+
+    monkeypatch.delenv("LIEPIN_CLI_EXECUTABLE", raising=False)
+    assert DEFAULT_LIEPIN_CLI_EXECUTABLE == ".liepin-venv/bin/liepin-cli"
+    resolved = resolve_liepin_cli_executable(None)
+    assert resolved.name == "liepin-cli"
+    assert resolved.as_posix().endswith(".liepin-venv/bin/liepin-cli")
+
+
+def test_liepin_cli_without_execute_permission(tmp_path):
+    fake_cli = tmp_path / "noexec-cli"
+    fake_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_cli.chmod(0o644)
+    assert liepin_cli_installed(str(fake_cli)) is False
 
 
 def test_sanitize_liepin_error_text_redacts_secrets_and_truncates():
@@ -234,26 +253,42 @@ def test_normalize_liepin_job_fields():
 
 
 @pytest.mark.asyncio
-async def test_cli_success_two_jobs():
+async def test_cli_success_two_jobs(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
     payload = _ok_payload([_job("1"), _job("2", title="信息安全工程师")])
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    captured: dict[str, Any] = {}
 
     async def _fake_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env") or {}
         return _FakeProcess(stdout=raw, returncode=0)
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
-        with patch(
-            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-            side_effect=_fake_exec,
-        ):
-            result = await run_liepin_search("安全", "广东", 1, config=_cfg())
+    with patch(
+        "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+        side_effect=_fake_exec,
+    ):
+        result = await run_liepin_search(
+            "安全",
+            "广东",
+            0,
+            config=_cfg(cli_executable=str(fake_cli)),
+        )
     assert result["code"] == 0
     assert len(result["data"]["jobs"]) == 2
+    assert captured["args"][0] == str(fake_cli.resolve())
+    assert captured["args"][1:3] == ("job", "search")
+    assert "-m" not in captured["args"]
+    assert "liepin_cli.main" not in captured["args"]
+    assert TEST_TOKEN not in captured["args"]
+    assert captured["env"].get("LIEPIN_USER_TOKEN") == TEST_TOKEN
 
 
 @pytest.mark.asyncio
-async def test_cli_nonzero_returncode_logs_sanitized(monkeypatch, caplog):
+async def test_cli_nonzero_returncode_logs_sanitized(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
     stderr = (
         f"x-user-token: {TEST_TOKEN}\n"
         "Authorization: Bearer leak-bearer-token\n"
@@ -269,13 +304,17 @@ async def test_cli_nonzero_returncode_logs_sanitized(monkeypatch, caplog):
         return _FakeProcess(stdout=stdout, stderr=stderr, returncode=2)
 
     with caplog.at_level("INFO", logger="secskill_data_service.liepin"):
-        with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
-            with patch(
-                "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-                side_effect=_fake_exec,
-            ):
-                with pytest.raises(LiepinCliError) as exc:
-                    await run_liepin_search("安全", "广东", 0, config=_cfg())
+        with patch(
+            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+            side_effect=_fake_exec,
+        ):
+            with pytest.raises(LiepinCliError) as exc:
+                await run_liepin_search(
+                    "安全",
+                    "广东",
+                    0,
+                    config=_cfg(cli_executable=str(fake_cli)),
+                )
     assert exc.value.error_code == "CLI_NONZERO_EXIT"
     joined = "\n".join(r.message for r in caplog.records)
     assert "event=liepin_cli_failed" in joined
@@ -292,96 +331,116 @@ async def test_cli_nonzero_returncode_logs_sanitized(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_cli_stdout_not_json():
+async def test_cli_stdout_not_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
+
     async def _fake_exec(*args, **kwargs):
         return _FakeProcess(stdout=b"not-json{{{", returncode=0)
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
-        with patch(
-            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-            side_effect=_fake_exec,
-        ):
-            with pytest.raises(LiepinCliError) as exc:
-                await run_liepin_search("安全", "广东", 1, config=_cfg())
+    with patch(
+        "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+        side_effect=_fake_exec,
+    ):
+        with pytest.raises(LiepinCliError) as exc:
+            await run_liepin_search(
+                "安全", "广东", 0, config=_cfg(cli_executable=str(fake_cli))
+            )
     assert exc.value.error_code == "INVALID_JSON"
 
 
 @pytest.mark.asyncio
-async def test_cli_payload_code_nonzero():
+async def test_cli_payload_code_nonzero(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
     raw = json.dumps({"code": 1001, "data": {"jobs": []}}).encode()
 
     async def _fake_exec(*args, **kwargs):
         return _FakeProcess(stdout=raw, returncode=0)
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
-        with patch(
-            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-            side_effect=_fake_exec,
-        ):
-            with pytest.raises(LiepinCliError) as exc:
-                await run_liepin_search("安全", "广东", 1, config=_cfg())
+    with patch(
+        "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+        side_effect=_fake_exec,
+    ):
+        with pytest.raises(LiepinCliError) as exc:
+            await run_liepin_search(
+                "安全", "广东", 0, config=_cfg(cli_executable=str(fake_cli))
+            )
     assert exc.value.error_code == "PAYLOAD_CODE_ERROR"
 
 
 @pytest.mark.asyncio
-async def test_cli_stdout_exceeds_max_bytes():
+async def test_cli_stdout_exceeds_max_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
     huge = b"x" * 5000
 
     async def _fake_exec(*args, **kwargs):
         return _FakeProcess(stdout=huge, returncode=0)
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
-        with patch(
-            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-            side_effect=_fake_exec,
-        ):
-            with pytest.raises(LiepinCliError) as exc:
-                await run_liepin_search(
-                    "安全",
-                    "广东",
-                    1,
-                    config=_cfg(output_max_bytes=1024),
-                )
+    with patch(
+        "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+        side_effect=_fake_exec,
+    ):
+        with pytest.raises(LiepinCliError) as exc:
+            await run_liepin_search(
+                "安全",
+                "广东",
+                0,
+                config=_cfg(cli_executable=str(fake_cli), output_max_bytes=1024),
+            )
     assert exc.value.error_code == "OUTPUT_TOO_LARGE"
 
 
 @pytest.mark.asyncio
-async def test_cli_timeout_kills_process():
+async def test_cli_timeout_kills_process(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
     proc = _FakeProcess(hang=True)
 
     async def _fake_exec(*args, **kwargs):
         return proc
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
-        with patch(
-            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-            side_effect=_fake_exec,
-        ):
-            with pytest.raises(LiepinCliError) as exc:
-                await run_liepin_search(
-                    "安全",
-                    "广东",
-                    1,
-                    config=_cfg(timeout_seconds=0.05),
-                )
+    with patch(
+        "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+        side_effect=_fake_exec,
+    ):
+        with pytest.raises(LiepinCliError) as exc:
+            await run_liepin_search(
+                "安全",
+                "广东",
+                0,
+                config=_cfg(cli_executable=str(fake_cli), timeout_seconds=0.05),
+            )
     assert exc.value.error_code == "TIMEOUT"
     assert proc.killed is True
 
 
 @pytest.mark.asyncio
-async def test_cli_token_missing():
+async def test_cli_token_missing(tmp_path, monkeypatch):
+    monkeypatch.delenv("LIEPIN_USER_TOKEN", raising=False)
+    fake_cli = _make_fake_cli(tmp_path)
     with pytest.raises(LiepinCliError) as exc:
         await run_liepin_search(
-            "安全", "广东", 1, config=_cfg(user_token_configured=False)
+            "安全",
+            "广东",
+            0,
+            config=_cfg(cli_executable=str(fake_cli), user_token_configured=False),
         )
     assert exc.value.error_code == "TOKEN_MISSING"
 
 
 @pytest.mark.asyncio
-async def test_cli_not_installed():
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=False):
-        with pytest.raises(LiepinCliError) as exc:
-            await run_liepin_search("安全", "广东", 1, config=_cfg())
+async def test_cli_not_installed(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    missing = tmp_path / "missing-liepin-cli"
+    with pytest.raises(LiepinCliError) as exc:
+        await run_liepin_search(
+            "安全",
+            "广东",
+            0,
+            config=_cfg(cli_executable=str(missing)),
+        )
     assert exc.value.error_code == "CLI_NOT_INSTALLED"
 
 
@@ -549,38 +608,37 @@ async def test_provider_max_pages_three_calls_zero_one_two():
 # ---------------------------------------------------------------------------
 
 
-def test_endpoint_success_integration(client, auth_headers, tmp_path):
+def test_endpoint_success_integration(client, auth_headers, tmp_path, monkeypatch):
     """端到端：mock create_subprocess_exec，走真实 endpoint + provider + runner。"""
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
     payload = _ok_payload(
         [_job("H1"), _job("H2", title="信息安全工程师", company="演示企业B")]
     )
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    fake_py = tmp_path / "liepin-python"
-    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
-    fake_py.chmod(0o755)
-    resolved = fake_py.resolve()
+    fake_cli = _make_fake_cli(tmp_path)
+    resolved = str(fake_cli.resolve())
 
     async def _fake_exec(*args, **kwargs):
-        assert args[0] == str(resolved)
-        assert args[1:5] == ("-m", "liepin_cli.main", "job", "search")
+        assert args[0] == resolved
+        assert args[1:3] == ("job", "search")
+        assert "-m" not in args
+        assert "liepin_cli.main" not in args
         assert "apply" not in args
         assert "resume" not in args
         assert "auth" not in args
+        assert TEST_TOKEN not in args
+        assert (kwargs.get("env") or {}).get("LIEPIN_USER_TOKEN") == TEST_TOKEN
         return _FakeProcess(stdout=raw, returncode=0)
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
+    with patch(
+        "providers.liepin.config.load_liepin_config",
+        return_value=_cfg(cache_ttl_seconds=0, cli_executable=str(fake_cli)),
+    ):
         with patch(
-            "providers.liepin.config.load_liepin_config",
-            return_value=_cfg(
-                cache_ttl_seconds=0,
-                python_executable=str(fake_py),
-            ),
+            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+            side_effect=_fake_exec,
         ):
-            with patch(
-                "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-                side_effect=_fake_exec,
-            ):
-                resp = client.post(COLLECT_LIEPIN, headers=auth_headers, json=BODY)
+            resp = client.post(COLLECT_LIEPIN, headers=auth_headers, json=BODY)
     assert resp.status_code == 200
     assert isinstance(resp.json()["result"], str)
     inner = _parse(resp)
@@ -591,31 +649,32 @@ def test_endpoint_success_integration(client, auth_headers, tmp_path):
         assert w in inner["warnings"]
 
 
-def test_endpoint_date_filter_warning(client, auth_headers):
+def test_endpoint_date_filter_warning(client, auth_headers, tmp_path, monkeypatch):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
     payload = _ok_payload([_job("D1")])
     raw = json.dumps(payload).encode()
 
     async def _fake_exec(*args, **kwargs):
         return _FakeProcess(stdout=raw, returncode=0)
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
+    with patch(
+        "providers.liepin.config.load_liepin_config",
+        return_value=_cfg(cache_ttl_seconds=0, cli_executable=str(fake_cli)),
+    ):
         with patch(
-            "providers.liepin.config.load_liepin_config",
-            return_value=_cfg(cache_ttl_seconds=0),
+            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+            side_effect=_fake_exec,
         ):
-            with patch(
-                "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-                side_effect=_fake_exec,
-            ):
-                resp = client.post(
-                    COLLECT_LIEPIN,
-                    headers=auth_headers,
-                    json={
-                        **BODY,
-                        "start_date": "2026-05-01",
-                        "end_date": "2026-08-01",
-                    },
-                )
+            resp = client.post(
+                COLLECT_LIEPIN,
+                headers=auth_headers,
+                json={
+                    **BODY,
+                    "start_date": "2026-05-01",
+                    "end_date": "2026-08-01",
+                },
+            )
     assert resp.status_code == 200
     inner = _parse(resp)
     assert "DATE_FILTER_NOT_SUPPORTED_BY_LIEPIN_SEARCH" in inner["warnings"]
@@ -652,8 +711,9 @@ def test_endpoint_cli_missing_503(client, auth_headers):
     assert resp.json()["detail"]["error_code"] == "LIEPIN_CLI_NOT_INSTALLED"
 
 
-def test_endpoint_cli_nonzero_hides_stderr(client, auth_headers, monkeypatch, caplog):
+def test_endpoint_cli_nonzero_hides_stderr(client, auth_headers, tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    fake_cli = _make_fake_cli(tmp_path)
     secret = "stderr-should-not-leak-to-http"
 
     async def _fake_exec(*args, **kwargs):
@@ -664,16 +724,15 @@ def test_endpoint_cli_nonzero_hides_stderr(client, auth_headers, monkeypatch, ca
         )
 
     with caplog.at_level("INFO", logger="secskill_data_service.liepin"):
-        with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
+        with patch(
+            "providers.liepin.config.load_liepin_config",
+            return_value=_cfg(cache_ttl_seconds=0, cli_executable=str(fake_cli)),
+        ):
             with patch(
-                "providers.liepin.config.load_liepin_config",
-                return_value=_cfg(cache_ttl_seconds=0),
+                "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+                side_effect=_fake_exec,
             ):
-                with patch(
-                    "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-                    side_effect=_fake_exec,
-                ):
-                    resp = client.post(COLLECT_LIEPIN, headers=auth_headers, json=BODY)
+                resp = client.post(COLLECT_LIEPIN, headers=auth_headers, json=BODY)
     assert resp.status_code == 502
     body = resp.json()
     assert body["detail"]["error_code"] == "LIEPIN_CLI_PROCESS_FAILED"
@@ -784,26 +843,35 @@ def test_liepin_cli_isolation_pin_is_consistent(monkeypatch):
     assert len(LIEPIN_CLI_PINNED_COMMIT) == 40
     assert LIEPIN_CLI_VERSION_NOT_PINNED is False
     env_example = (root / ".env.example").read_text(encoding="utf-8")
+    assert "LIEPIN_CLI_EXECUTABLE=.liepin-venv/bin/liepin-cli" in env_example
     assert "LIEPIN_PYTHON_EXECUTABLE=.liepin-venv/bin/python" in env_example
     assert f"LIEPIN_CLI_COMMIT={LIEPIN_CLI_PINNED_COMMIT}" in env_example
     render = (root / "render.yaml").read_text(encoding="utf-8")
     assert "bash build.sh" in render
+    assert "LIEPIN_CLI_EXECUTABLE" in render
     assert "LIEPIN_PYTHON_EXECUTABLE" in render
     assert LIEPIN_CLI_PINNED_COMMIT in render
     assert "WEB_CONCURRENCY" in render
+    build_sh = (root / "build.sh").read_text(encoding="utf-8")
+    assert "test -x .liepin-venv/bin/liepin-cli" in build_sh
+    assert "liepin-cli --help" in build_sh
+    assert "liepin-cli job search --help" in build_sh
     assert (root / ".python-version").read_text(encoding="utf-8").strip() == "3.12.7"
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
     assert ".liepin-venv/" in gitignore
     monkeypatch.delenv("LIEPIN_CLI_COMMIT", raising=False)
+    monkeypatch.delenv("LIEPIN_CLI_EXECUTABLE", raising=False)
     monkeypatch.delenv("LIEPIN_PYTHON_EXECUTABLE", raising=False)
     cfg = load_liepin_config()
     assert cfg.cli_commit == LIEPIN_CLI_PINNED_COMMIT
+    assert cfg.cli_executable == ".liepin-venv/bin/liepin-cli"
     assert cfg.python_executable == ".liepin-venv/bin/python"
     health = liepin_health_snapshot("mcp_jobs")
-    assert health["liepin_invocation_mode"] == "isolated_python_module"
+    assert health["liepin_invocation_mode"] == "isolated_console_script"
     assert isinstance(health["liepin_token_configured"], bool)
     assert isinstance(health["liepin_cli_installed"], bool)
     assert "liepin_provider_enabled" in health
     dumped = json.dumps(health)
     assert "LIEPIN_USER_TOKEN" not in dumped
     assert "Bearer" not in dumped
+    assert str(root) not in dumped

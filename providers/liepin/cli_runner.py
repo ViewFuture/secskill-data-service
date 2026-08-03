@@ -1,4 +1,4 @@
-"""猎聘 CLI 异步执行器（独立 venv Python；仅允许 job search）。"""
+"""猎聘 CLI 异步执行器（独立 venv 控制台脚本；仅允许 job search）。"""
 
 from __future__ import annotations
 
@@ -12,14 +12,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from providers.liepin.cli_pin import DEFAULT_LIEPIN_PYTHON_EXECUTABLE
+from providers.liepin.cli_pin import DEFAULT_LIEPIN_CLI_EXECUTABLE
 from providers.liepin.config import LiepinConfig
 from providers.liepin.models import FORBIDDEN_CLI_TOKENS
 
 logger = logging.getLogger("secskill_data_service.liepin")
 
-LIEPIN_MODULE = "liepin_cli.main"
-LIEPIN_INVOCATION_MODE = "isolated_python_module"
+LIEPIN_INVOCATION_MODE = "isolated_console_script"
 # providers/liepin/cli_runner.py → 仓库根目录
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -33,25 +32,40 @@ class LiepinCliError(Exception):
         self.message = message
 
 
-def resolve_liepin_python_executable(raw: str | None = None) -> Path:
-    """解析独立猎聘 Python 路径；相对路径以项目根目录为基准。"""
+def resolve_liepin_cli_executable(raw: str | None = None) -> Path:
+    """解析独立猎聘 CLI 控制台脚本路径；相对路径以项目根目录为基准。"""
     text = (
-        raw if raw is not None else os.getenv("LIEPIN_PYTHON_EXECUTABLE") or ""
+        raw if raw is not None else os.getenv("LIEPIN_CLI_EXECUTABLE") or ""
     ).strip()
     if not text:
-        text = DEFAULT_LIEPIN_PYTHON_EXECUTABLE
+        text = DEFAULT_LIEPIN_CLI_EXECUTABLE
     path = Path(text)
     if not path.is_absolute():
         path = _PROJECT_ROOT / path
     return path.resolve()
 
 
-def liepin_cli_installed(python_executable: str | None = None) -> bool:
-    """独立 Python 文件存在且可执行（不在主环境 import liepin_cli）。"""
-    path = resolve_liepin_python_executable(python_executable)
+# 兼容旧名（健康检查 / 旧测试可能引用）
+resolve_liepin_python_executable = resolve_liepin_cli_executable
+
+
+def get_liepin_cli_executable(raw: str | None = None) -> Path:
+    """解析并校验 CLI 可执行文件；失败抛出 CLI_NOT_INSTALLED。"""
+    path = resolve_liepin_cli_executable(raw)
     try:
-        return path.is_file() and os.access(path, os.X_OK)
-    except OSError:
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise LiepinCliError("CLI_NOT_INSTALLED", "liepin-cli is not installed")
+    except OSError as exc:
+        raise LiepinCliError("CLI_NOT_INSTALLED", "liepin-cli is not installed") from exc
+    return path
+
+
+def liepin_cli_installed(cli_executable: str | None = None) -> bool:
+    """独立 liepin-cli 控制台脚本存在且可执行。"""
+    try:
+        get_liepin_cli_executable(cli_executable)
+        return True
+    except LiepinCliError:
         return False
 
 
@@ -60,14 +74,15 @@ def build_liepin_search_argv(
     address: str,
     page: int,
     *,
+    cli_executable: str | None = None,
     python_executable: str | None = None,
 ) -> list[str]:
-    """构造只读搜索 argv：<LIEPIN_PYTHON> -m liepin_cli.main job search …"""
-    py = str(resolve_liepin_python_executable(python_executable))
+    """构造只读搜索 argv：<liepin-cli> job search …"""
+    # python_executable 仅为兼容旧调用签名，正式搜索忽略。
+    _ = python_executable
+    cli = str(resolve_liepin_cli_executable(cli_executable))
     return [
-        py,
-        "-m",
-        LIEPIN_MODULE,
+        cli,
         "job",
         "search",
         "--job-name",
@@ -81,26 +96,28 @@ def build_liepin_search_argv(
     ]
 
 
-def _assert_safe_search_argv(argv: list[str], *, python_executable: Path) -> None:
-    """硬校验命令列表仅包含 job search，拒绝 apply/resume/auth/skill 子命令。"""
+def _assert_safe_search_argv(argv: list[str], *, cli_executable: Path) -> None:
+    """硬校验命令列表仅包含 job search，拒绝 apply/resume/auth/skill。"""
     # 固定形态：
-    # <liepin-python> -m liepin_cli.main job search --job-name X --address Y --page N --output json
-    if len(argv) != 13:
+    # <liepin-cli> job search --job-name X --address Y --page N --output json
+    if len(argv) != 11:
         raise LiepinCliError("INVALID_COMMAND", "Unexpected CLI argv shape")
-    if argv[0] != str(python_executable):
-        raise LiepinCliError("INVALID_COMMAND", "CLI interpreter not allowed")
-    if argv[1] != "-m" or argv[2] != LIEPIN_MODULE:
-        raise LiepinCliError("INVALID_COMMAND", "CLI module not allowed")
-    if argv[3] != "job" or argv[4] != "search":
+    if argv[0] != str(cli_executable):
+        raise LiepinCliError("INVALID_COMMAND", "CLI binary not allowed")
+    if argv[1] != "job" or argv[2] != "search":
         raise LiepinCliError("FORBIDDEN_COMMAND", "Only job search is allowed")
-    subcommand = " ".join(argv[3:5]).lower()
+    subcommand = " ".join(argv[1:3]).lower()
     for token in FORBIDDEN_CLI_TOKENS:
         if token in subcommand:
             raise LiepinCliError("FORBIDDEN_COMMAND", "Command not allowed")
-    if argv[5] != "--job-name" or argv[7] != "--address" or argv[9] != "--page":
+    if argv[3] != "--job-name" or argv[5] != "--address" or argv[7] != "--page":
         raise LiepinCliError("INVALID_COMMAND", "Unexpected CLI flags")
-    if argv[11] != "--output" or argv[12] != "json":
+    if argv[9] != "--output" or argv[10] != "json":
         raise LiepinCliError("INVALID_COMMAND", "Output must be json")
+    joined = " ".join(argv).lower()
+    if "apply" in joined or "resume" in joined or "auth" in joined:
+        if argv[1] != "job" or argv[2] != "search":
+            raise LiepinCliError("FORBIDDEN_COMMAND", "Command not allowed")
 
 
 def sanitize_liepin_error_text(
@@ -215,7 +232,7 @@ async def run_liepin_search(
     config: LiepinConfig,
     request_id: str | None = None,
 ) -> dict[str, Any]:
-    """异步执行独立 venv 中的 `python -m liepin_cli.main job search`。
+    """异步执行独立 venv 中的 `liepin-cli job search`。
 
     Token 仅通过子进程环境变量 LIEPIN_USER_TOKEN 传递，不写入 argv。
     """
@@ -228,7 +245,8 @@ async def run_liepin_search(
     stderr = b""
     token = ""
 
-    if not config.user_token_configured:
+    token = (os.getenv("LIEPIN_USER_TOKEN") or "").strip()
+    if not token or not config.user_token_configured:
         error_code = "TOKEN_MISSING"
         logger.info(
             "liepin_search request_id=%s keyword=%s region=%s page=%s "
@@ -244,11 +262,10 @@ async def run_liepin_search(
         )
         raise LiepinCliError(error_code, "Liepin token is not configured")
 
-    token = (os.getenv("LIEPIN_USER_TOKEN") or "").strip()
-
-    py_path = resolve_liepin_python_executable(config.python_executable)
-    if not liepin_cli_installed(str(py_path)):
-        error_code = "CLI_NOT_INSTALLED"
+    try:
+        cli_path = get_liepin_cli_executable(config.cli_executable)
+    except LiepinCliError as exc:
+        error_code = exc.error_code
         logger.info(
             "liepin_search request_id=%s keyword=%s region=%s page=%s "
             "duration_ms=%s returncode=%s item_count=%s error_code=%s",
@@ -261,15 +278,15 @@ async def run_liepin_search(
             item_count,
             error_code,
         )
-        raise LiepinCliError(error_code, "liepin-cli is not installed")
+        raise
 
     argv = build_liepin_search_argv(
         job_name,
         address,
         page,
-        python_executable=str(py_path),
+        cli_executable=str(cli_path),
     )
-    _assert_safe_search_argv(argv, python_executable=py_path)
+    _assert_safe_search_argv(argv, cli_executable=cli_path)
 
     # 继承完整环境，并显式写入 Token；不在日志中打印 env。
     env = os.environ.copy()

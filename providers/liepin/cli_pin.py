@@ -17,4 +17,6 @@ LIEPIN_CLI_VERSION_NOT_PINNED = False
 
 LIEPIN_CLI_PIP_URL = f"git+{LIEPIN_CLI_GIT_URL}@{LIEPIN_CLI_PINNED_COMMIT}"
 
+DEFAULT_LIEPIN_CLI_EXECUTABLE = ".liepin-venv/bin/liepin-cli"
+# 兼容旧部署配置（运行时搜索优先使用 CLI 脚本，不再用 python -m）。
 DEFAULT_LIEPIN_PYTHON_EXECUTABLE = ".liepin-venv/bin/python"

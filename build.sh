@@ -31,11 +31,10 @@ print("Liepin Python:", sys.executable)
 print("Liepin package:", liepin_cli.__file__)
 PY
 
-echo "==> Verifying Liepin CLI module entry"
-.liepin-venv/bin/python \
-  -m liepin_cli.main \
-  --help \
-  >/dev/null
+echo "==> Verifying Liepin CLI console script"
+test -x .liepin-venv/bin/liepin-cli
+.liepin-venv/bin/liepin-cli --help >/dev/null
+.liepin-venv/bin/liepin-cli job search --help >/dev/null
 
 echo "==> Liepin CLI isolated environment ready"
 echo "==> Build completed successfully"
