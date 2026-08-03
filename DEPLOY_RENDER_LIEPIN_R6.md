@@ -73,10 +73,12 @@ bash build.sh
 
 `build.sh` 会：
 
-1. `pip install -r requirements.txt`（主 FastAPI 环境，**不含** liepin-cli）
+1. `pip install -r requirements.txt`（主 FastAPI 环境，**不含** liepin-cli，**不含** pytest）
 2. 重建 `.liepin-venv`
 3. 在独立 venv 内安装 `requirements-liepin.txt`
 4. 验证 `import liepin_cli` 与 `python -m liepin_cli.main --help`
+
+本地跑测试请另装：`pip install -r requirements-dev.txt`（Render 生产构建不安装）。
 
 `requirements-liepin.txt` 当前为：
 

@@ -68,10 +68,23 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ### 2. 安装依赖
 
 ```powershell
+# 生产运行依赖（Render build.sh 仅安装此文件）
 pip install -r requirements.txt
+
+# 本地开发 / 跑测试（含 pytest；Render 生产构建不安装）
+pip install -r requirements-dev.txt
+
 # 可选：构建独立猎聘 venv（Render 使用 bash build.sh）
 # bash build.sh
 ```
+
+运行测试：
+
+```powershell
+python -m pytest -q
+```
+
+说明：`pytest` / `pytest-asyncio` 仅在 `requirements-dev.txt`；Render Build Command 为 `bash build.sh`，**不会**安装测试依赖。
 
 ### 3. 创建 `.env`
 
@@ -218,7 +231,8 @@ git push -u origin main
 | Auto Deploy | Enabled / On |
 
 猎聘 CLI 安装在独立虚拟环境 `.liepin-venv`（见 `build.sh` / `requirements-liepin.txt`），**不得**写入主 `requirements.txt`。  
-CLI 钉死 commit：`858a62bd839d490e8745b7503961e4676a54b9d7`（`git ls-remote` main）。
+CLI 钉死 commit：`858a62bd839d490e8745b7503961e4676a54b9d7`（`git ls-remote` main）。  
+生产 `requirements.txt` 不含 pytest；本地测试请 `pip install -r requirements-dev.txt`。
 
 环境变量补充：
 
