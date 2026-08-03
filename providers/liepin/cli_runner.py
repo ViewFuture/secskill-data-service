@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -102,6 +103,94 @@ def _assert_safe_search_argv(argv: list[str], *, python_executable: Path) -> Non
         raise LiepinCliError("INVALID_COMMAND", "Output must be json")
 
 
+def sanitize_liepin_error_text(
+    text: str,
+    token: str,
+    max_chars: int = 2000,
+) -> str:
+    """脱敏 stderr/错误消息尾部，供内部诊断日志使用（不进入 HTTP）。"""
+    cleaned = "".join(
+        ch if (ch == "\n" or ch == "\t" or ord(ch) >= 32) else " "
+        for ch in (text or "")
+    )
+    if token:
+        cleaned = cleaned.replace(token, "[REDACTED]")
+    patterns = [
+        r"(?i)x-user-token\s*[:=]\s*\S+",
+        r"(?i)authorization\s*:\s*bearer\s+\S+",
+        r"(?i)cookie\s*[:=]\s*[^\s;]+(?:;[^\s;]+)*",
+        r"(?i)\btoken\s*=\s*[^&\s]+",
+        r"(?i)\baccess_token\s*=\s*[^&\s]+",
+        r"(?i)\buser_token\s*=\s*[^&\s]+",
+        r"(?i)([?&](?:token|access_token|user_token)=)[^&\s]+",
+    ]
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "[REDACTED]", cleaned)
+    # 岗位数组不得进入诊断日志
+    cleaned = re.sub(
+        r'(?is)("(?:jobs|list|items|jobList|records)"\s*:\s*)\[.*?\]',
+        r"\1[REDACTED]",
+        cleaned,
+    )
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[-max_chars:]
+    return cleaned
+
+
+def _extract_stdout_error_fields(
+    stdout: bytes, token: str
+) -> tuple[Any, str]:
+    """从 stdout JSON 仅提取错误字段，不触碰岗位数组。"""
+    try:
+        payload = json.loads(stdout.decode("utf-8", errors="replace"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None, ""
+    if not isinstance(payload, dict):
+        return None, ""
+    code = payload.get("code")
+    raw_msg = payload.get("message") or payload.get("msg") or payload.get("detail") or ""
+    if not isinstance(raw_msg, str):
+        raw_msg = str(raw_msg)
+    return code, sanitize_liepin_error_text(raw_msg, token, max_chars=500)
+
+
+def _log_cli_failure(
+    *,
+    request_id: str,
+    keyword: str,
+    region: str,
+    page: int,
+    duration_ms: int,
+    returncode: int | None,
+    stdout: bytes,
+    stderr: bytes,
+    token: str,
+) -> None:
+    stdout_code, stdout_msg = _extract_stdout_error_fields(stdout, token)
+    stderr_tail = sanitize_liepin_error_text(
+        stderr.decode("utf-8", errors="replace"),
+        token,
+        max_chars=2000,
+    )
+    logger.info(
+        "event=liepin_cli_failed request_id=%s keyword=%s region=%s page=%s "
+        "duration_ms=%s returncode=%s stdout_bytes=%s stderr_bytes=%s "
+        "stderr_tail_sanitized=%s stdout_error_code=%s "
+        "stdout_error_message_sanitized=%s",
+        request_id,
+        keyword,
+        region,
+        page,
+        duration_ms,
+        returncode,
+        len(stdout),
+        len(stderr),
+        stderr_tail,
+        stdout_code,
+        stdout_msg,
+    )
+
+
 async def _read_limited(stream: asyncio.StreamReader | None, limit: int) -> bytes:
     if stream is None:
         return b""
@@ -128,13 +217,16 @@ async def run_liepin_search(
 ) -> dict[str, Any]:
     """异步执行独立 venv 中的 `python -m liepin_cli.main job search`。
 
-    Token 仅通过继承环境变量 LIEPIN_USER_TOKEN 传递，不写入 argv。
+    Token 仅通过子进程环境变量 LIEPIN_USER_TOKEN 传递，不写入 argv。
     """
     rid = request_id or uuid.uuid4().hex[:12]
     started = time.perf_counter()
     error_code: str | None = None
     item_count = 0
     returncode: int | None = None
+    stdout = b""
+    stderr = b""
+    token = ""
 
     if not config.user_token_configured:
         error_code = "TOKEN_MISSING"
@@ -151,6 +243,8 @@ async def run_liepin_search(
             error_code,
         )
         raise LiepinCliError(error_code, "Liepin token is not configured")
+
+    token = (os.getenv("LIEPIN_USER_TOKEN") or "").strip()
 
     py_path = resolve_liepin_python_executable(config.python_executable)
     if not liepin_cli_installed(str(py_path)):
@@ -177,8 +271,9 @@ async def run_liepin_search(
     )
     _assert_safe_search_argv(argv, python_executable=py_path)
 
-    # 继承当前环境（含 LIEPIN_USER_TOKEN）；不在日志中打印 env。
+    # 继承完整环境，并显式写入 Token；不在日志中打印 env。
     env = os.environ.copy()
+    env["LIEPIN_USER_TOKEN"] = token
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -192,16 +287,15 @@ async def run_liepin_search(
             assert proc is not None
             assert proc.stdout is not None
             assert proc.stderr is not None
-            stdout = await _read_limited(proc.stdout, config.output_max_bytes)
-            # stderr 同样限制读取，但不回传内容
-            stderr = await _read_limited(
+            out = await _read_limited(proc.stdout, config.output_max_bytes)
+            err = await _read_limited(
                 proc.stderr, min(config.output_max_bytes, 256_000)
             )
             await proc.wait()
-            return stdout, stderr
+            return out, err
 
         try:
-            stdout, _stderr = await asyncio.wait_for(
+            stdout, stderr = await asyncio.wait_for(
                 _communicate(),
                 timeout=config.timeout_seconds,
             )
@@ -218,6 +312,17 @@ async def run_liepin_search(
         returncode = proc.returncode
         if returncode != 0:
             error_code = "CLI_NONZERO_EXIT"
+            _log_cli_failure(
+                request_id=rid,
+                keyword=job_name,
+                region=address,
+                page=page,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+                token=token,
+            )
             raise LiepinCliError(error_code, "Liepin CLI exited with error")
 
         try:

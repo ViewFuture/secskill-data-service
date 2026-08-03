@@ -236,9 +236,9 @@ async def collect_liepin_jobs(
     else:
         if strict and not liepin_cli_runner.liepin_cli_installed(cfg.python_executable):
             raise LiepinCliError("CLI_NOT_INSTALLED", "liepin-cli is not installed")
-        # 多关键词串行；页串行；进程内 semaphore 限制并发。
+        # 多关键词串行；页串行（零基 page：0..(max_pages-1)）；进程内 semaphore 限制并发。
         for keyword in keyword_list:
-            for page in range(1, cfg.max_pages + 1):
+            for page in range(cfg.max_pages):
                 jobs, ledger = await _search_one(
                     keyword=keyword,
                     region=address,

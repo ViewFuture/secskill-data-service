@@ -17,6 +17,7 @@ from providers.liepin.cli_runner import (
     build_liepin_search_argv,
     liepin_cli_installed,
     run_liepin_search,
+    sanitize_liepin_error_text,
 )
 from providers.liepin.config import LiepinConfig
 from providers.liepin.models import DEFAULT_WARNINGS, normalize_liepin_job
@@ -32,6 +33,7 @@ BODY = {
 }
 
 REQUIRED_WARNINGS = list(DEFAULT_WARNINGS)
+TEST_TOKEN = "unit-test-liepin-token"
 
 
 def _cfg(**overrides: Any) -> LiepinConfig:
@@ -168,6 +170,32 @@ def test_liepin_python_without_execute_permission(tmp_path):
     assert liepin_cli_installed(str(fake_py)) is False
 
 
+def test_sanitize_liepin_error_text_redacts_secrets_and_truncates():
+    token = "super-secret-token-value"
+    raw = (
+        f"x-user-token: {token}\n"
+        "Authorization: Bearer abcdefghijklmnop\n"
+        "Cookie: sid=abc; path=/\n"
+        f"token={token}&access_token=zzz&user_token=yyy\n"
+        "https://example.org/api?token=leak&access_token=leak2\n"
+        "ok"
+    )
+    cleaned = sanitize_liepin_error_text(raw, token, max_chars=2000)
+    assert token not in cleaned
+    assert "Bearer abcdefghijklmnop" not in cleaned
+    assert "sid=abc" not in cleaned
+    assert "access_token=zzz" not in cleaned
+    assert "user_token=yyy" not in cleaned
+    assert "token=leak" not in cleaned
+    assert "[REDACTED]" in cleaned
+
+    long_tail = "HEAD-" + ("Z" * 3000) + "-TAIL"
+    truncated = sanitize_liepin_error_text(long_tail, token="", max_chars=2000)
+    assert len(truncated) == 2000
+    assert truncated.endswith("-TAIL")
+    assert not truncated.startswith("HEAD-")
+
+
 def test_split_keywords_separators_and_dedupe():
     keys, truncated = split_liepin_keywords(
         "安全,运维，SOC|安全\n渗透", max_keywords=10
@@ -224,18 +252,43 @@ async def test_cli_success_two_jobs():
 
 
 @pytest.mark.asyncio
-async def test_cli_nonzero_returncode():
-    async def _fake_exec(*args, **kwargs):
-        return _FakeProcess(stdout=b"{}", returncode=2)
+async def test_cli_nonzero_returncode_logs_sanitized(monkeypatch, caplog):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    stderr = (
+        f"x-user-token: {TEST_TOKEN}\n"
+        "Authorization: Bearer leak-bearer-token\n"
+        "Cookie: sid=secretcookie\n"
+        f"token={TEST_TOKEN}&access_token=zzz\n"
+        '{"code":1,"message":"boom","data":{"jobs":[{"jobId":"X","jobName":"岗位"}]}}'
+    ).encode()
+    stdout = b'{"code":1,"message":"boom","data":{"jobs":[{"jobId":"X"}]}}'
 
-    with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
-        with patch(
-            "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
-            side_effect=_fake_exec,
-        ):
-            with pytest.raises(LiepinCliError) as exc:
-                await run_liepin_search("安全", "广东", 1, config=_cfg())
+    async def _fake_exec(*args, **kwargs):
+        assert TEST_TOKEN not in args
+        assert (kwargs.get("env") or {}).get("LIEPIN_USER_TOKEN") == TEST_TOKEN
+        return _FakeProcess(stdout=stdout, stderr=stderr, returncode=2)
+
+    with caplog.at_level("INFO", logger="secskill_data_service.liepin"):
+        with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
+            with patch(
+                "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+                side_effect=_fake_exec,
+            ):
+                with pytest.raises(LiepinCliError) as exc:
+                    await run_liepin_search("安全", "广东", 0, config=_cfg())
     assert exc.value.error_code == "CLI_NONZERO_EXIT"
+    joined = "\n".join(r.message for r in caplog.records)
+    assert "event=liepin_cli_failed" in joined
+    assert "returncode=2" in joined
+    assert "page=0" in joined
+    assert "stdout_bytes=" in joined
+    assert "stderr_bytes=" in joined
+    assert "stderr_tail_sanitized=" in joined
+    assert TEST_TOKEN not in joined
+    assert "leak-bearer-token" not in joined
+    assert "secretcookie" not in joined
+    assert '"jobId"' not in joined
+    assert "岗位" not in joined
 
 
 @pytest.mark.asyncio
@@ -437,6 +490,60 @@ async def test_provider_cache_hit():
     assert first["count"] == second["count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_provider_max_pages_one_calls_page_zero():
+    pages: list[int] = []
+
+    async def _fake(job_name, address, page, config, request_id=None):
+        pages.append(page)
+        return _ok_payload([_job(f"p{page}")])
+
+    with patch("providers.liepin.provider.run_liepin_search", side_effect=_fake):
+        await collect_liepin_jobs(
+            keywords="安全",
+            region="广东",
+            max_items=20,
+            config=_cfg(max_pages=1, cache_ttl_seconds=0),
+        )
+    assert pages == [0]
+
+
+@pytest.mark.asyncio
+async def test_provider_max_pages_two_calls_zero_and_one():
+    pages: list[int] = []
+
+    async def _fake(job_name, address, page, config, request_id=None):
+        pages.append(page)
+        return _ok_payload([_job(f"p{page}")])
+
+    with patch("providers.liepin.provider.run_liepin_search", side_effect=_fake):
+        await collect_liepin_jobs(
+            keywords="安全",
+            region="广东",
+            max_items=20,
+            config=_cfg(max_pages=2, cache_ttl_seconds=0),
+        )
+    assert pages == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_provider_max_pages_three_calls_zero_one_two():
+    pages: list[int] = []
+
+    async def _fake(job_name, address, page, config, request_id=None):
+        pages.append(page)
+        return _ok_payload([_job(f"p{page}")])
+
+    with patch("providers.liepin.provider.run_liepin_search", side_effect=_fake):
+        await collect_liepin_jobs(
+            keywords="安全",
+            region="广东",
+            max_items=20,
+            config=_cfg(max_pages=3, cache_ttl_seconds=0),
+        )
+    assert pages == [0, 1, 2]
+
+
 # ---------------------------------------------------------------------------
 # HTTP 接口
 # ---------------------------------------------------------------------------
@@ -543,6 +650,42 @@ def test_endpoint_cli_missing_503(client, auth_headers):
             resp = client.post(COLLECT_LIEPIN, headers=auth_headers, json=BODY)
     assert resp.status_code == 503
     assert resp.json()["detail"]["error_code"] == "LIEPIN_CLI_NOT_INSTALLED"
+
+
+def test_endpoint_cli_nonzero_hides_stderr(client, auth_headers, monkeypatch, caplog):
+    monkeypatch.setenv("LIEPIN_USER_TOKEN", TEST_TOKEN)
+    secret = "stderr-should-not-leak-to-http"
+
+    async def _fake_exec(*args, **kwargs):
+        return _FakeProcess(
+            stdout=b'{"code":1,"message":"fail"}',
+            stderr=f"Authorization: Bearer {secret}\nboom".encode(),
+            returncode=1,
+        )
+
+    with caplog.at_level("INFO", logger="secskill_data_service.liepin"):
+        with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
+            with patch(
+                "providers.liepin.config.load_liepin_config",
+                return_value=_cfg(cache_ttl_seconds=0),
+            ):
+                with patch(
+                    "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
+                    side_effect=_fake_exec,
+                ):
+                    resp = client.post(COLLECT_LIEPIN, headers=auth_headers, json=BODY)
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["detail"]["error_code"] == "LIEPIN_CLI_PROCESS_FAILED"
+    assert "Liepin CLI exited with error" in body["detail"]["message"]
+    dumped = json.dumps(body, ensure_ascii=False)
+    assert secret not in dumped
+    assert "stderr" not in dumped.lower()
+    assert TEST_TOKEN not in dumped
+    joined = "\n".join(r.message for r in caplog.records)
+    assert "event=liepin_cli_failed" in joined
+    assert secret not in joined
+    assert TEST_TOKEN not in joined
 
 
 def test_endpoint_timeout_504(client, auth_headers):
