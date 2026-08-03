@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from providers.liepin import cli_runner as liepin_cli_runner
 from providers.liepin.cache import TtlCache
 from providers.liepin.cli_runner import (
+    LIEPIN_INVOCATION_MODE,
     LiepinCliError,
-    liepin_cli_installed,
     run_liepin_search,
 )
 from providers.liepin.config import LiepinConfig, load_liepin_config
@@ -68,11 +69,14 @@ def split_liepin_keywords(
 
 
 def liepin_health_snapshot(job_provider: str = "") -> dict[str, Any]:
-    """健康检查用猎聘状态（不含 Token / Token 长度）。"""
+    """健康检查用猎聘状态（不含 Token / Token 长度 / 敏感完整路径）。"""
     cfg = load_liepin_config()
     provider = (job_provider or "").strip().lower()
     return {
-        "liepin_cli_installed": liepin_cli_installed(),
+        "liepin_cli_installed": liepin_cli_runner.liepin_cli_installed(
+            cfg.python_executable
+        ),
+        "liepin_invocation_mode": LIEPIN_INVOCATION_MODE,
         "liepin_token_configured": cfg.user_token_configured,
         "liepin_provider_enabled": provider == "liepin_cli",
         "liepin_cli_commit": cfg.cli_commit,
@@ -230,7 +234,7 @@ async def collect_liepin_jobs(
             }
         )
     else:
-        if strict and not liepin_cli_installed():
+        if strict and not liepin_cli_runner.liepin_cli_installed(cfg.python_executable):
             raise LiepinCliError("CLI_NOT_INSTALLED", "liepin-cli is not installed")
         # 多关键词串行；页串行；进程内 semaphore 限制并发。
         for keyword in keyword_list:

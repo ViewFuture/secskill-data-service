@@ -15,6 +15,7 @@ from providers.liepin.cache import TtlCache
 from providers.liepin.cli_runner import (
     LiepinCliError,
     build_liepin_search_argv,
+    liepin_cli_installed,
     run_liepin_search,
 )
 from providers.liepin.config import LiepinConfig
@@ -45,6 +46,7 @@ def _cfg(**overrides: Any) -> LiepinConfig:
         output_max_bytes=2_000_000,
         cli_commit="test-commit",
         fallback_to_snapshot=False,
+        python_executable=".liepin-venv/bin/python",
     )
     base.update(overrides)
     return LiepinConfig(**base)
@@ -139,14 +141,31 @@ def _clear_liepin_runtime_state():
 # ---------------------------------------------------------------------------
 
 
-def test_build_liepin_search_argv_uses_module_invocation():
-    import sys
+def test_build_liepin_search_argv_uses_module_invocation(tmp_path):
+    fake_py = tmp_path / "liepin-python"
+    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_py.chmod(0o755)
 
-    argv = build_liepin_search_argv("安全工程师", "广东", 1)
-    assert argv[0] == sys.executable
+    argv = build_liepin_search_argv(
+        "安全工程师",
+        "广东",
+        1,
+        python_executable=str(fake_py),
+    )
+    assert argv[0] == str(fake_py.resolve())
     assert argv[1:5] == ["-m", "liepin_cli.main", "job", "search"]
     assert "--job-name" in argv and "安全工程师" in argv
-    assert "apply" not in argv and "resume" not in argv
+    assert "apply" not in argv and "resume" not in argv and "auth" not in argv
+    assert liepin_cli_installed(str(fake_py)) is True
+    missing = tmp_path / "missing-python"
+    assert liepin_cli_installed(str(missing)) is False
+
+
+def test_liepin_python_without_execute_permission(tmp_path):
+    fake_py = tmp_path / "noexec-python"
+    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_py.chmod(0o644)
+    assert liepin_cli_installed(str(fake_py)) is False
 
 
 def test_split_keywords_separators_and_dedupe():
@@ -423,24 +442,32 @@ async def test_provider_cache_hit():
 # ---------------------------------------------------------------------------
 
 
-def test_endpoint_success_integration(client, auth_headers):
+def test_endpoint_success_integration(client, auth_headers, tmp_path):
     """端到端：mock create_subprocess_exec，走真实 endpoint + provider + runner。"""
     payload = _ok_payload(
         [_job("H1"), _job("H2", title="信息安全工程师", company="演示企业B")]
     )
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    fake_py = tmp_path / "liepin-python"
+    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_py.chmod(0o755)
+    resolved = fake_py.resolve()
 
     async def _fake_exec(*args, **kwargs):
-        assert args[0] == __import__("sys").executable
+        assert args[0] == str(resolved)
         assert args[1:5] == ("-m", "liepin_cli.main", "job", "search")
         assert "apply" not in args
         assert "resume" not in args
+        assert "auth" not in args
         return _FakeProcess(stdout=raw, returncode=0)
 
     with patch("providers.liepin.cli_runner.liepin_cli_installed", return_value=True):
         with patch(
             "providers.liepin.config.load_liepin_config",
-            return_value=_cfg(cache_ttl_seconds=0),
+            return_value=_cfg(
+                cache_ttl_seconds=0,
+                python_executable=str(fake_py),
+            ),
         ):
             with patch(
                 "providers.liepin.cli_runner.asyncio.create_subprocess_exec",
@@ -590,29 +617,50 @@ def test_ttl_cache_unit():
     assert cache.get("b") is None
 
 
-def test_liepin_cli_commit_pin_is_consistent(monkeypatch):
-    """P0：cli_pin / requirements.txt / .env.example / render.yaml 钉死同一 commit。"""
+def test_liepin_cli_isolation_pin_is_consistent(monkeypatch):
+    """主 requirements 不含 CLI；独立 requirements-liepin 钉死完整 SHA。"""
     from pathlib import Path
 
-    from providers.liepin.cli_pin import LIEPIN_CLI_PINNED_COMMIT
+    from providers.liepin.cli_pin import (
+        LIEPIN_CLI_PINNED_COMMIT,
+        LIEPIN_CLI_VERSION_NOT_PINNED,
+    )
     from providers.liepin.config import load_liepin_config
+    from providers.liepin.provider import liepin_health_snapshot
 
     root = Path(__file__).resolve().parents[1]
-    assert len(LIEPIN_CLI_PINNED_COMMIT) == 40
-    req = (root / "requirements.txt").read_text(encoding="utf-8")
-    expected_line = (
-        "liepin-cli @ git+https://github.com/liepin-tech-2026/liepin-cil.git@"
+    main_req = (root / "requirements.txt").read_text(encoding="utf-8")
+    assert "liepin-cli" not in main_req
+    assert "liepin-cil" not in main_req
+    assert "git+https://github.com/liepin-tech-2026/liepin-cil" not in main_req
+    liepin_req = (root / "requirements-liepin.txt").read_text(encoding="utf-8").strip()
+    assert liepin_req == (
+        "git+https://github.com/liepin-tech-2026/liepin-cil.git@"
         f"{LIEPIN_CLI_PINNED_COMMIT}"
     )
-    assert expected_line in req
-    assert "<LIEPIN_CLI_COMMIT>" not in req
-    assert "@main" not in req
+    assert len(LIEPIN_CLI_PINNED_COMMIT) == 40
+    assert LIEPIN_CLI_VERSION_NOT_PINNED is False
     env_example = (root / ".env.example").read_text(encoding="utf-8")
+    assert "LIEPIN_PYTHON_EXECUTABLE=.liepin-venv/bin/python" in env_example
     assert f"LIEPIN_CLI_COMMIT={LIEPIN_CLI_PINNED_COMMIT}" in env_example
     render = (root / "render.yaml").read_text(encoding="utf-8")
+    assert "bash build.sh" in render
+    assert "LIEPIN_PYTHON_EXECUTABLE" in render
     assert LIEPIN_CLI_PINNED_COMMIT in render
-    assert "PYTHON_VERSION" in render
+    assert "WEB_CONCURRENCY" in render
     assert (root / ".python-version").read_text(encoding="utf-8").strip() == "3.12.7"
+    gitignore = (root / ".gitignore").read_text(encoding="utf-8")
+    assert ".liepin-venv/" in gitignore
     monkeypatch.delenv("LIEPIN_CLI_COMMIT", raising=False)
+    monkeypatch.delenv("LIEPIN_PYTHON_EXECUTABLE", raising=False)
     cfg = load_liepin_config()
     assert cfg.cli_commit == LIEPIN_CLI_PINNED_COMMIT
+    assert cfg.python_executable == ".liepin-venv/bin/python"
+    health = liepin_health_snapshot("mcp_jobs")
+    assert health["liepin_invocation_mode"] == "isolated_python_module"
+    assert isinstance(health["liepin_token_configured"], bool)
+    assert isinstance(health["liepin_cli_installed"], bool)
+    assert "liepin_provider_enabled" in health
+    dumped = json.dumps(health)
+    assert "LIEPIN_USER_TOKEN" not in dumped
+    assert "Bearer" not in dumped

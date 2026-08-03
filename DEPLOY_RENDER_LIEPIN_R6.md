@@ -14,19 +14,20 @@
 | 门禁 | 要求 | 当前状态 |
 |------|------|----------|
 | Python | 固定 **3.12.7**（`.python-version` + Render `PYTHON_VERSION`） | **已处理** |
-| liepin-cli | 构建安装钉死 commit `858a62bd839d490e8745b7503961e4676a54b9d7` | **已处理**（`requirements-liepin.txt` + `scripts/install_liepin_cli.sh`） |
+| liepin-cli 隔离 | 独立 `.liepin-venv` + `bash build.sh`；主 `requirements.txt` 不含 CLI | **已处理** |
+| CLI 版本冻结 | `858a62bd839d490e8745b7503961e4676a54b9d7`（`git ls-remote` main） | **已钉死** |
 | 密钥 | Render Dashboard 填写 `PLUGIN_TOKEN`、`LIEPIN_USER_TOKEN`（`sync: false`） | 勿入库 |
 | 测试 | `pytest -q` 全绿 | 见测试报告 |
 
-`LIEPIN_CLI_COMMIT` 已在 Blueprint 中写入同一 SHA（非密钥）。独立路径 `/plugin/v1/jobs/collect-liepin` 仍需 Dashboard 中的 `LIEPIN_USER_TOKEN`，否则返回 503。
+独立路径 `/plugin/v1/jobs/collect-liepin` 仍需 Dashboard 中的 `LIEPIN_USER_TOKEN`，否则返回 503。
 
 ---
 
 ## 1. 架构要点（部署相关）
 
 - 网关：FastAPI + uvicorn，**单进程**推荐（信号量/缓存在进程内）。
-- 猎聘：子进程执行且仅允许  
-  `liepin-cli job search --job-name … --address … --page … --output json`
+- 猎聘：独立 venv 子进程，仅允许  
+  `<LIEPIN_PYTHON_EXECUTABLE> -m liepin_cli.main job search --job-name … --address … --page … --output json`
 - Token：环境变量 `LIEPIN_USER_TOKEN` 继承给子进程，**禁止**写入 argv / 日志 / OpenAPI。
 - 独立工具：`POST /plugin/v1/jobs/collect-liepin`，`operationId=collectLiepinJobs`。
 - 原工具：`POST /plugin/v1/jobs/collect`，`operationId=collectPublicJobs`（保持不变）。
@@ -62,27 +63,38 @@ uvicorn app:app --host 0.0.0.0 --port $PORT
 
 ---
 
-## 3. 构建命令（已钉死 CLI）
+## 3. 构建命令（独立猎聘 venv）
 
 Blueprint：
 
 ```text
-pip install -r requirements.txt && python -c "import liepin_cli"
+bash build.sh
 ```
 
-`requirements.txt` 末行已钉死：
+`build.sh` 会：
+
+1. `pip install -r requirements.txt`（主 FastAPI 环境，**不含** liepin-cli）
+2. 重建 `.liepin-venv`
+3. 在独立 venv 内安装 `requirements-liepin.txt`
+4. 验证 `import liepin_cli` 与 `python -m liepin_cli.main --help`
+
+`requirements-liepin.txt` 当前为：
 
 ```text
-liepin-cli @ git+https://github.com/liepin-tech-2026/liepin-cil.git@858a62bd839d490e8745b7503961e4676a54b9d7
+git+https://github.com/liepin-tech-2026/liepin-cil.git@858a62bd839d490e8745b7503961e4676a54b9d7
 ```
 
-运行时通过 `sys.executable -m liepin_cli.main job search …` 调用（`asyncio.create_subprocess_exec`，无 shell）。
+（SHA 来自 `git ls-remote … refs/heads/main`，已冻结。）
+
+运行时通过 `LIEPIN_PYTHON_EXECUTABLE`（默认 `.liepin-venv/bin/python`）执行模块调用（`asyncio.create_subprocess_exec`，无 shell）。
 
 环境变量：
 
 ```text
 PYTHON_VERSION=3.12.7
+LIEPIN_PYTHON_EXECUTABLE=.liepin-venv/bin/python
 LIEPIN_CLI_COMMIT=858a62bd839d490e8745b7503961e4676a54b9d7
+WEB_CONCURRENCY=1
 ```
 
 启动后 `/health` 应出现：
@@ -90,6 +102,7 @@ LIEPIN_CLI_COMMIT=858a62bd839d490e8745b7503961e4676a54b9d7
 ```json
 {
   "liepin_cli_installed": true,
+  "liepin_invocation_mode": "isolated_python_module",
   "liepin_token_configured": true,
   "liepin_provider_enabled": false,
   "liepin_cli_commit": "858a62bd839d490e8745b7503961e4676a54b9d7"
@@ -110,6 +123,7 @@ LIEPIN_CLI_COMMIT=858a62bd839d490e8745b7503961e4676a54b9d7
 | `JOB_PROVIDER` | `mcp_jobs`（保持原行为） |
 | `MCP_JOBS_ENABLED` | `true` |
 | `LIEPIN_USER_TOKEN` | （Dashboard 密钥） |
+| `LIEPIN_PYTHON_EXECUTABLE` | `.liepin-venv/bin/python` |
 | `LIEPIN_FALLBACK_TO_SNAPSHOT` | `false` |
 
 星辰侧可同时挂两个工具：`collectPublicJobs` + `collectLiepinJobs`。
@@ -130,7 +144,7 @@ LIEPIN_CLI_COMMIT=858a62bd839d490e8745b7503961e4676a54b9d7
 1. Render → Service → Environment。
 2. 设置 `PLUGIN_TOKEN`（强随机，与星辰插件 Bearer 一致）。
 3. 设置 `LIEPIN_USER_TOKEN`（猎聘用户授权 Token；**仅此环境**）。
-4. 设置 `LIEPIN_CLI_COMMIT`。
+4. 确认 `LIEPIN_PYTHON_EXECUTABLE=.liepin-venv/bin/python`。
 5. 设置 `PUBLIC_BASE_URL` 为公网 URL（供 OpenAPI servers）。
 6. 保存并 **Manual Deploy**（若未自动部署）。
 
@@ -145,10 +159,10 @@ LIEPIN_CLI_COMMIT=858a62bd839d490e8745b7503961e4676a54b9d7
 ## 6. 部署步骤（Checklist）
 
 1. [ ] 合并/提交猎聘代码（本手册不执行 push）
-2. [x] `.python-version` → `3.12.7`（P0-1）
-3. [x] `buildCommand` 安装钉死 commit 的 liepin-cli（P0-2）
-4. [ ] Dashboard 填写 `PLUGIN_TOKEN` / `LIEPIN_USER_TOKEN`（`LIEPIN_CLI_COMMIT` 已由 Blueprint 写入）
-5. [ ] Deploy 成功，`GET /health` 返回 `status=ok` 且 `liepin_cli_installed=true`
+2. [x] `.python-version` → `3.12.7`
+3. [x] `buildCommand` → `bash build.sh`（独立 `.liepin-venv`）
+4. [ ] Dashboard 填写 `PLUGIN_TOKEN` / `LIEPIN_USER_TOKEN`（确认 `LIEPIN_PYTHON_EXECUTABLE`）
+5. [ ] Deploy 成功，`GET /health` 返回 `status=ok`、`liepin_cli_installed=true`、`liepin_invocation_mode=isolated_python_module`
 6. [ ] 用错误 Bearer 调 collect-liepin → **401**
 7. [ ] 用正确 Bearer 调 collect-liepin → **200**，`result` 为 JSON **字符串**
 8. [ ] 确认内层 `data_mode=live_authorized_liepin`，`trend_eligible` 全 false

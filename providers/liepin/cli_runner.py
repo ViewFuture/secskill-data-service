@@ -1,23 +1,26 @@
-"""猎聘 CLI 异步执行器（仅允许 job search）。"""
+"""猎聘 CLI 异步执行器（独立 venv Python；仅允许 job search）。"""
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import logging
 import os
-import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
+from providers.liepin.cli_pin import DEFAULT_LIEPIN_PYTHON_EXECUTABLE
 from providers.liepin.config import LiepinConfig
 from providers.liepin.models import FORBIDDEN_CLI_TOKENS
 
 logger = logging.getLogger("secskill_data_service.liepin")
 
 LIEPIN_MODULE = "liepin_cli.main"
+LIEPIN_INVOCATION_MODE = "isolated_python_module"
+# providers/liepin/cli_runner.py → 仓库根目录
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class LiepinCliError(Exception):
@@ -29,15 +32,39 @@ class LiepinCliError(Exception):
         self.message = message
 
 
-def liepin_cli_installed() -> bool:
-    """检查 liepin_cli 包是否可导入（以模块方式调用，不依赖 PATH 入口脚本）。"""
-    return importlib.util.find_spec("liepin_cli") is not None
+def resolve_liepin_python_executable(raw: str | None = None) -> Path:
+    """解析独立猎聘 Python 路径；相对路径以项目根目录为基准。"""
+    text = (
+        raw if raw is not None else os.getenv("LIEPIN_PYTHON_EXECUTABLE") or ""
+    ).strip()
+    if not text:
+        text = DEFAULT_LIEPIN_PYTHON_EXECUTABLE
+    path = Path(text)
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    return path.resolve()
 
 
-def build_liepin_search_argv(job_name: str, address: str, page: int) -> list[str]:
-    """构造只读搜索 argv：sys.executable -m liepin_cli.main job search …"""
+def liepin_cli_installed(python_executable: str | None = None) -> bool:
+    """独立 Python 文件存在且可执行（不在主环境 import liepin_cli）。"""
+    path = resolve_liepin_python_executable(python_executable)
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def build_liepin_search_argv(
+    job_name: str,
+    address: str,
+    page: int,
+    *,
+    python_executable: str | None = None,
+) -> list[str]:
+    """构造只读搜索 argv：<LIEPIN_PYTHON> -m liepin_cli.main job search …"""
+    py = str(resolve_liepin_python_executable(python_executable))
     return [
-        sys.executable,
+        py,
         "-m",
         LIEPIN_MODULE,
         "job",
@@ -53,13 +80,13 @@ def build_liepin_search_argv(job_name: str, address: str, page: int) -> list[str
     ]
 
 
-def _assert_safe_search_argv(argv: list[str]) -> None:
+def _assert_safe_search_argv(argv: list[str], *, python_executable: Path) -> None:
     """硬校验命令列表仅包含 job search，拒绝 apply/resume/auth/skill 子命令。"""
     # 固定形态：
-    # <python> -m liepin_cli.main job search --job-name X --address Y --page N --output json
+    # <liepin-python> -m liepin_cli.main job search --job-name X --address Y --page N --output json
     if len(argv) != 13:
         raise LiepinCliError("INVALID_COMMAND", "Unexpected CLI argv shape")
-    if argv[0] != sys.executable:
+    if argv[0] != str(python_executable):
         raise LiepinCliError("INVALID_COMMAND", "CLI interpreter not allowed")
     if argv[1] != "-m" or argv[2] != LIEPIN_MODULE:
         raise LiepinCliError("INVALID_COMMAND", "CLI module not allowed")
@@ -99,7 +126,7 @@ async def run_liepin_search(
     config: LiepinConfig,
     request_id: str | None = None,
 ) -> dict[str, Any]:
-    """异步执行 `python -m liepin_cli.main job search`，返回解析后的 JSON 对象。
+    """异步执行独立 venv 中的 `python -m liepin_cli.main job search`。
 
     Token 仅通过继承环境变量 LIEPIN_USER_TOKEN 传递，不写入 argv。
     """
@@ -125,7 +152,8 @@ async def run_liepin_search(
         )
         raise LiepinCliError(error_code, "Liepin token is not configured")
 
-    if not liepin_cli_installed():
+    py_path = resolve_liepin_python_executable(config.python_executable)
+    if not liepin_cli_installed(str(py_path)):
         error_code = "CLI_NOT_INSTALLED"
         logger.info(
             "liepin_search request_id=%s keyword=%s region=%s page=%s "
@@ -141,8 +169,13 @@ async def run_liepin_search(
         )
         raise LiepinCliError(error_code, "liepin-cli is not installed")
 
-    argv = build_liepin_search_argv(job_name, address, page)
-    _assert_safe_search_argv(argv)
+    argv = build_liepin_search_argv(
+        job_name,
+        address,
+        page,
+        python_executable=str(py_path),
+    )
+    _assert_safe_search_argv(argv, python_executable=py_path)
 
     # 继承当前环境（含 LIEPIN_USER_TOKEN）；不在日志中打印 env。
     env = os.environ.copy()

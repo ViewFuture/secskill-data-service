@@ -1,2 +1,1 @@
-# 已合并进 requirements.txt（保留本文件仅作兼容别名，内容必须与主清单一致）。
-liepin-cli @ git+https://github.com/liepin-tech-2026/liepin-cil.git@858a62bd839d490e8745b7503961e4676a54b9d7
+git+https://github.com/liepin-tech-2026/liepin-cil.git@858a62bd839d490e8745b7503961e4676a54b9d7

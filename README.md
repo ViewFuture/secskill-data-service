@@ -69,8 +69,8 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ```powershell
 pip install -r requirements.txt
-# requirements.txt 已含钉死 commit 的 liepin-cli；本地亦可：
-# bash scripts/install_liepin_cli.sh
+# 可选：构建独立猎聘 venv（Render 使用 bash build.sh）
+# bash build.sh
 ```
 
 ### 3. 创建 `.env`
@@ -211,11 +211,21 @@ git push -u origin main
 |------|--------|
 | Language / Runtime | Python |
 | Branch | `main`（或你的默认分支） |
-| Build Command | `pip install -r requirements.txt && python -c "import liepin_cli"` |
+| Build Command | `bash build.sh` |
 | Python | **3.12.7**（`.python-version` / `PYTHON_VERSION`） |
 | Start Command | `uvicorn app:app --host 0.0.0.0 --port $PORT` |
 | Health Check Path | `/health` |
 | Auto Deploy | Enabled / On |
+
+猎聘 CLI 安装在独立虚拟环境 `.liepin-venv`（见 `build.sh` / `requirements-liepin.txt`），**不得**写入主 `requirements.txt`。  
+CLI 钉死 commit：`858a62bd839d490e8745b7503961e4676a54b9d7`（`git ls-remote` main）。
+
+环境变量补充：
+
+| Key | Value | 说明 |
+|-----|-------|------|
+| `LIEPIN_PYTHON_EXECUTABLE` | `.liepin-venv/bin/python` | 独立 venv 解释器 |
+| `LIEPIN_USER_TOKEN` | （Dashboard，勿入库） | 猎聘授权 Token |
 
 **Environment Variables：**
 

@@ -1,19 +1,20 @@
-"""猎聘 CLI 上游钉死版本（发布门禁单一事实来源）。
+"""猎聘 CLI 上游钉死版本（独立 .liepin-venv；与主项目依赖隔离）。
 
-安装（推荐）：
-  pip install -r requirements.txt
+安装：
+  bash build.sh
 
-对应上游：
+上游：
   https://github.com/liepin-tech-2026/liepin-cil
 """
 
 from __future__ import annotations
 
-# 全仓唯一允许的 liepin-cli Git commit（完整 SHA）。
 LIEPIN_CLI_GIT_URL = "https://github.com/liepin-tech-2026/liepin-cil.git"
+# 由 git ls-remote refs/heads/main 得到的完整 SHA（不得编造）。
 LIEPIN_CLI_PINNED_COMMIT = "858a62bd839d490e8745b7503961e4676a54b9d7"
+LIEPIN_CLI_REF = LIEPIN_CLI_PINNED_COMMIT
+LIEPIN_CLI_VERSION_NOT_PINNED = False
 
-# pip 可安装的 URL（须与 requirements.txt 中的 liepin-cli @ git+ 行一致）。
-LIEPIN_CLI_PIP_URL = (
-    f"liepin-cli @ git+{LIEPIN_CLI_GIT_URL}@{LIEPIN_CLI_PINNED_COMMIT}"
-)
+LIEPIN_CLI_PIP_URL = f"git+{LIEPIN_CLI_GIT_URL}@{LIEPIN_CLI_PINNED_COMMIT}"
+
+DEFAULT_LIEPIN_PYTHON_EXECUTABLE = ".liepin-venv/bin/python"
