@@ -39,10 +39,20 @@ MAX_TEXT_FIELD_LEN = 200
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
-    """将常见布尔字符串解析为 bool。"""
-    if value is None or value.strip() == "":
+    """统一布尔解析：true/1/yes/on → True；false/0/no/off/空串 → False。
+
+    禁止使用 bool("false")（恒为 True）。忽略大小写与前后空白。
+    """
+    if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    text = value.strip().lower()
+    if text == "":
+        return False
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _parse_float(value: str | None, default: float = 15.0) -> float:
@@ -56,6 +66,17 @@ def _parse_float(value: str | None, default: float = 15.0) -> float:
         return default
 
 
+def _parse_int(value: str | None, default: int = 1) -> int:
+    """安全地将环境变量转换为 int。"""
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid int env value; using default=%s", default)
+        return default
+
+
 PLUGIN_TOKEN: str | None = os.getenv("PLUGIN_TOKEN") or None
 PUBLIC_BASE_URL: str = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
 DEMO_MODE: bool = _parse_bool(os.getenv("DEMO_MODE"), default=True)
@@ -63,6 +84,31 @@ SOURCE_FILE: str = os.getenv("SOURCE_FILE") or "sources.json"
 DEMO_FILE: str = os.getenv("DEMO_FILE") or "fixtures/jobs.json"
 REQUEST_TIMEOUT_SECONDS: float = _parse_float(
     os.getenv("REQUEST_TIMEOUT_SECONDS"), default=15.0
+)
+JOB_PROVIDER: str = (os.getenv("JOB_PROVIDER") or "").strip().lower()
+MCP_JOBS_ENABLED: bool = _parse_bool(os.getenv("MCP_JOBS_ENABLED"), default=False)
+MCP_JOBS_BASE_URL: str = (os.getenv("MCP_JOBS_BASE_URL") or "").rstrip("/")
+MCP_JOBS_TOKEN: str | None = os.getenv("MCP_JOBS_TOKEN") or None
+MCP_JOBS_TIMEOUT_SECONDS: float = _parse_float(
+    os.getenv("MCP_JOBS_TIMEOUT_SECONDS"), default=180.0
+)
+MCP_JOBS_FALLBACK_TO_DEMO: bool = _parse_bool(
+    os.getenv("MCP_JOBS_FALLBACK_TO_DEMO"), default=True
+)
+MCP_JOBS_PAGE: int = _parse_int(os.getenv("MCP_JOBS_PAGE"), default=1)
+DATE_FILTER_MODE: str = (os.getenv("DATE_FILTER_MODE") or "soft").strip().lower()
+
+logger.info(
+    "runtime_config demo_mode=%s job_provider=%s mcp_jobs_enabled=%s "
+    "adapter_base_url_configured=%s adapter_token_configured=%s "
+    "mcp_jobs_timeout_seconds=%s mcp_jobs_page=%s",
+    DEMO_MODE,
+    JOB_PROVIDER or "(empty)",
+    MCP_JOBS_ENABLED,
+    bool(MCP_JOBS_BASE_URL),
+    bool(MCP_JOBS_TOKEN),
+    MCP_JOBS_TIMEOUT_SECONDS,
+    MCP_JOBS_PAGE,
 )
 
 _servers = [{"url": PUBLIC_BASE_URL}] if PUBLIC_BASE_URL else None
@@ -551,11 +597,15 @@ def _build_tool_result(
     request: CollectPublicJobsRequest,
     source_ledger: list[dict[str, Any]],
     warnings: list[str],
+    provider: str | None = None,
+    provider_version: str | None = None,
 ) -> ToolResponse:
     """组装星辰插件约定的 ToolResponse。"""
-    payload = {
+    payload: dict[str, Any] = {
         "count": len(items),
         "data_mode": data_mode,
+        "provider": provider,
+        "provider_version": provider_version,
         "batch_preview": {
             "keywords": request.keywords,
             "region": request.region,
@@ -586,6 +636,199 @@ def _validate_request_dates(request: CollectPublicJobsRequest) -> tuple[date, da
             detail="start_date must not be later than end_date",
         )
     return start, end
+
+
+def _mcp_search_url() -> str:
+    """构造 Adapter 搜索 URL（BASE 去尾斜杠后拼接一次路径）。"""
+    base = MCP_JOBS_BASE_URL.rstrip("/")
+    return f"{base}/internal/v1/jobs/search"
+
+
+def _map_adapter_jobs(
+    jobs: list[Any],
+    *,
+    provider_code: str,
+    provider_name: str,
+) -> list[dict[str, Any]]:
+    """将 Adapter jobs 规范化为网关 raw_items。"""
+    items: list[dict[str, Any]] = []
+    for raw in jobs:
+        if not isinstance(raw, dict):
+            continue
+        item = normalize_item(
+            raw,
+            source_code=str(raw.get("source_code") or provider_code),
+            source_name=str(raw.get("source_name") or provider_name),
+        )
+        if item is None:
+            # 保留 Adapter 原始可用字段，避免因字段别名丢失整条记录
+            title = str(raw.get("job_title") or raw.get("title") or "").strip()
+            company = str(raw.get("company") or "").strip()
+            if not title:
+                continue
+            item = {
+                "job_title": title,
+                "company": company or "unknown",
+                "region": str(raw.get("region") or raw.get("city") or ""),
+                "publish_date": str(raw.get("publish_date") or raw.get("date") or ""),
+                "description": str(raw.get("description") or ""),
+                "skills": normalize_skills(raw.get("skills")),
+                "source_url": str(raw.get("source_url") or raw.get("url") or ""),
+                "source_code": provider_code,
+                "source_name": provider_name,
+            }
+        items.append(item)
+    return items
+
+
+async def call_mcp_jobs_adapter(
+    request: CollectPublicJobsRequest,
+) -> tuple[dict[str, Any], int]:
+    """调用 MCP Jobs Adapter，返回 (JSON body, http_status)。
+
+    不记录 Token / Authorization / 完整请求头。
+    """
+    if not MCP_JOBS_BASE_URL:
+        raise ValueError("MCP_JOBS_BASE_URL is not configured")
+    if not MCP_JOBS_TOKEN:
+        raise ValueError("MCP_JOBS_TOKEN is not configured")
+
+    url = _mcp_search_url()
+    payload = {
+        "keyword": request.keywords,
+        "city": request.region,
+        "page": MCP_JOBS_PAGE,
+        "max_items": request.max_items,
+        "salary": "",
+        "work_year": "",
+    }
+    headers = {
+        "X-Internal-Token": MCP_JOBS_TOKEN,
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    async with httpx.AsyncClient(
+        timeout=MCP_JOBS_TIMEOUT_SECONDS,
+        follow_redirects=False,
+    ) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        status_code = response.status_code
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict):
+            raise ValueError("Adapter response must be a JSON object")
+        return body, status_code
+
+
+async def _collect_mcp_jobs(
+    request: CollectPublicJobsRequest,
+    *,
+    keywords: list[str],
+    start: date,
+    end: date,
+) -> ToolResponse:
+    """通过 MCP Jobs Adapter 采集岗位。"""
+    selected_provider = "mcp_jobs"
+    try:
+        body, http_status = await call_mcp_jobs_adapter(request)
+        adapter_mode = str(body.get("mode") or "").strip().lower()
+        provider = str(body.get("provider") or "mcp-jobs")
+        provider_version = body.get("provider_version")
+        if provider_version is not None:
+            provider_version = str(provider_version)
+        jobs_value = body.get("jobs")
+        jobs_raw: list[Any] = jobs_value if isinstance(jobs_value, list) else []
+        ledger_value = body.get("source_ledger")
+        ledger: list[dict[str, Any]] = (
+            [item for item in ledger_value if isinstance(item, dict)]
+            if isinstance(ledger_value, list)
+            else []
+        )
+        warnings_value = body.get("warnings")
+        warnings: list[str] = (
+            [str(item) for item in warnings_value]
+            if isinstance(warnings_value, list)
+            else []
+        )
+
+        items = _map_adapter_jobs(
+            jobs_raw,
+            provider_code="mcp_jobs",
+            provider_name=provider,
+        )
+        if DATE_FILTER_MODE == "hard":
+            items = [
+                item
+                for item in items
+                if matches_request(
+                    item,
+                    keywords=keywords,
+                    region=request.region,
+                    start=start,
+                    end=end,
+                )
+            ]
+        items = deduplicate_items(items)[: request.max_items]
+
+        if adapter_mode == "live":
+            data_mode = "live_public_mcp"
+        else:
+            data_mode = "mcp_adapter_fixture"
+
+        logger.info(
+            "collect_done selected_provider=%s adapter_response_mode=%s "
+            "adapter_http_status=%s returned_job_count=%s",
+            selected_provider,
+            adapter_mode or "(empty)",
+            http_status,
+            len(items),
+        )
+        return _build_tool_result(
+            items=items,
+            data_mode=data_mode,
+            request=request,
+            source_ledger=ledger,
+            warnings=warnings,
+            provider=provider,
+            provider_version=provider_version,
+        )
+    except Exception as exc:  # noqa: BLE001 — Adapter 失败不静默落入 public sources
+        err_name = type(exc).__name__
+        logger.warning(
+            "collect_done selected_provider=%s adapter_response_mode=error "
+            "adapter_http_status=none returned_job_count=0 error_type=%s",
+            selected_provider,
+            err_name,
+        )
+        if MCP_JOBS_FALLBACK_TO_DEMO:
+            fallback = await _collect_demo(
+                request, keywords=keywords, start=start, end=end
+            )
+            inner = json.loads(fallback.result)
+            warnings = list(inner.get("warnings") or [])
+            warnings.append("FALLBACK_TO_DEMO_AFTER_MCP_FAILURE")
+            warnings.append(f"MCP_ADAPTER_ERROR:{err_name}")
+            return _build_tool_result(
+                items=list(inner.get("raw_items") or []),
+                data_mode="fallback_demo",
+                request=request,
+                source_ledger=list(inner.get("source_ledger") or []),
+                warnings=warnings,
+                provider=None,
+                provider_version=None,
+            )
+        return _build_tool_result(
+            items=[],
+            data_mode="live_public_mcp_failed",
+            request=request,
+            source_ledger=[],
+            warnings=[
+                "MCP_JOBS_ADAPTER_FAILED",
+                f"MCP_ADAPTER_ERROR:{err_name}",
+            ],
+            provider="mcp-jobs",
+            provider_version=None,
+        )
 
 
 async def _collect_demo(
@@ -752,7 +995,7 @@ async def health() -> dict[str, str]:
     dependencies=[Depends(require_plugin_token)],
 )
 async def collect_public_jobs(request: CollectPublicJobsRequest) -> ToolResponse:
-    """采集公开岗位数据（演示或白名单 JSON Feed）。"""
+    """采集公开岗位数据（demo / MCP Jobs Adapter / 白名单 JSON Feed）。"""
     start, end = _validate_request_dates(request)
     keywords = _split_keywords(request.keywords)
     if not keywords:
@@ -761,10 +1004,39 @@ async def collect_public_jobs(request: CollectPublicJobsRequest) -> ToolResponse
             detail="keywords must contain at least one non-empty token",
         )
 
+    # 优先级：DEMO_MODE → mcp_jobs → public sources
     if DEMO_MODE:
-        return await _collect_demo(
+        logger.info(
+            "collect_routing selected_provider=demo demo_mode=true job_provider=%s",
+            JOB_PROVIDER or "(empty)",
+        )
+        result = await _collect_demo(
             request, keywords=keywords, start=start, end=end
         )
-    return await _collect_live(
+        logger.info(
+            "collect_done selected_provider=demo adapter_response_mode=none "
+            "adapter_http_status=none returned_job_count=%s",
+            json.loads(result.result).get("count"),
+        )
+        return result
+
+    if JOB_PROVIDER == "mcp_jobs" and MCP_JOBS_ENABLED:
+        return await _collect_mcp_jobs(
+            request, keywords=keywords, start=start, end=end
+        )
+
+    logger.info(
+        "collect_routing selected_provider=public_sources demo_mode=false "
+        "job_provider=%s mcp_jobs_enabled=%s",
+        JOB_PROVIDER or "(empty)",
+        MCP_JOBS_ENABLED,
+    )
+    result = await _collect_live(
         request, keywords=keywords, start=start, end=end
     )
+    logger.info(
+        "collect_done selected_provider=public_sources adapter_response_mode=none "
+        "adapter_http_status=none returned_job_count=%s",
+        json.loads(result.result).get("count"),
+    )
+    return result

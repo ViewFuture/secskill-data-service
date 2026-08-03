@@ -55,7 +55,7 @@
     "/plugin/v1/jobs/collect": {
       "post": {
         "summary": "Collect Public Jobs",
-        "description": "采集公开岗位数据（演示或白名单 JSON Feed）。",
+        "description": "采集公开岗位数据（demo / MCP Jobs Adapter / 白名单 JSON Feed）。",
         "operationId": "collectPublicJobs",
         "requestBody": {
           "content": {

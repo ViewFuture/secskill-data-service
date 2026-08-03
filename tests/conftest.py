@@ -109,6 +109,13 @@ def configured_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, demo_jobs_pa
     monkeypatch.setenv("SOURCE_FILE", str(source_file))
     monkeypatch.setenv("DEMO_FILE", str(demo_file))
     monkeypatch.setenv("REQUEST_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("JOB_PROVIDER", "")
+    monkeypatch.setenv("MCP_JOBS_ENABLED", "false")
+    monkeypatch.setenv("MCP_JOBS_BASE_URL", "")
+    monkeypatch.delenv("MCP_JOBS_TOKEN", raising=False)
+    monkeypatch.setenv("MCP_JOBS_FALLBACK_TO_DEMO", "true")
+    monkeypatch.setenv("MCP_JOBS_PAGE", "1")
+    monkeypatch.setenv("DATE_FILTER_MODE", "soft")
 
     monkeypatch.setattr(app_module, "PLUGIN_TOKEN", TEST_TOKEN)
     monkeypatch.setattr(app_module, "DEMO_MODE", True)
@@ -116,6 +123,14 @@ def configured_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, demo_jobs_pa
     monkeypatch.setattr(app_module, "SOURCE_FILE", str(source_file))
     monkeypatch.setattr(app_module, "DEMO_FILE", str(demo_file))
     monkeypatch.setattr(app_module, "REQUEST_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(app_module, "JOB_PROVIDER", "")
+    monkeypatch.setattr(app_module, "MCP_JOBS_ENABLED", False)
+    monkeypatch.setattr(app_module, "MCP_JOBS_BASE_URL", "")
+    monkeypatch.setattr(app_module, "MCP_JOBS_TOKEN", None)
+    monkeypatch.setattr(app_module, "MCP_JOBS_FALLBACK_TO_DEMO", True)
+    monkeypatch.setattr(app_module, "MCP_JOBS_PAGE", 1)
+    monkeypatch.setattr(app_module, "MCP_JOBS_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(app_module, "DATE_FILTER_MODE", "soft")
 
     return {
         "token": TEST_TOKEN,

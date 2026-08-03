@@ -1,6 +1,6 @@
 # Render Blueprint for SecSkill_Data_Service
 # Docs: https://render.com/docs/blueprint-spec
-# Secrets (PLUGIN_TOKEN / PUBLIC_BASE_URL) use sync:false — set them in the Render Dashboard.
+# Secrets use sync:false — set them in the Render Dashboard.
 # No database / no persistent disk.
 
 services:
@@ -18,10 +18,26 @@ services:
       - key: PUBLIC_BASE_URL
         sync: false
       - key: DEMO_MODE
-        value: "true"
+        value: "false"
       - key: SOURCE_FILE
         value: sources.json
       - key: DEMO_FILE
         value: fixtures/jobs.json
       - key: REQUEST_TIMEOUT_SECONDS
         value: "20"
+      - key: JOB_PROVIDER
+        value: mcp_jobs
+      - key: MCP_JOBS_ENABLED
+        value: "true"
+      - key: MCP_JOBS_BASE_URL
+        value: https://secskill-mcp-jobs-adapter.onrender.com
+      - key: MCP_JOBS_TOKEN
+        sync: false
+      - key: MCP_JOBS_TIMEOUT_SECONDS
+        value: "180"
+      - key: MCP_JOBS_FALLBACK_TO_DEMO
+        value: "true"
+      - key: MCP_JOBS_PAGE
+        value: "1"
+      - key: DATE_FILTER_MODE
+        value: soft
